@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Zeta Persona Quick Editor
 // @namespace    zeta-persona-editor
-// @version      1.4.3
+// @version      1.4.4
 // @description  현재 방의 유저 페르소나를 자동으로 불러와서, 페이지 이동 없이 바로 수정/자동저장하는 미니 에디터
 // @match        https://zeta-ai.io/*
 // @match        https://*.zeta-ai.io/*
@@ -13,33 +13,13 @@
 
     "use strict";
 
-    // ==========================
-    // Zeta Persona Quick Editor v1.4.3
-    //
-    // 원리:
-    // - 유저노트/마커/base+note 조합 없음. 그냥 필드 값을 있는 그대로
-    //   불러와서(1:1), 수정하면 있는 그대로(1:1) 덮어쓴다. 절대 중복/누적 안 됨.
-    // - 모드 두 가지:
-    //   1) 유저 페르소나 (user-chat-profiles, PATCH — 그 필드만 갱신)
-    //   2) {{char}} 상세 (plots, PUT — 문서 전체를 다시 보내야 해서,
-    //      저장 직전마다 서버 최신본을 다시 받아와서 딱 그 필드만 바꾸고
-    //      나머지는 절대 안 건드림. 기본설정+나레이터+캐릭터별 설명 합쳐서
-    //      1200자 서버 제한 있음, 실측 확인됨(PLOT_CONTENT_CONSTRAINT_VIOLATION))
-    // - 현재 방(room)의 plotId를 실시간 요청 훔쳐보기로 감지.
-    // - 방을 옮기면 자동으로 그 방 것으로 전환된다.
-    // - 드롭다운으로 다른 대상을 수동으로 골라서 편집할 수도 있다.
-    // - 입력을 멈추면(디바운스) 자동저장 — 단, 자동저장 토글 켜져 있을 때만.
-    //   꺼져있으면 수동으로 "저장" 버튼 눌러야 함.
-    // - 인증 토큰은 site가 만드는 실제 요청에서 실시간으로 훔쳐봐서 재사용.
-    // ==========================
-
     if (window.__ZETA_PERSONA_EDITOR_RUNNING__) {
         console.log("🩶 Zeta Persona Editor already running.");
         return;
     }
     window.__ZETA_PERSONA_EDITOR_RUNNING__ = true;
 
-    const VERSION = "1.4.3";
+    const VERSION = "1.4.4";
 
     const PROFILES_LIST_RE = /\/v1\/user-chat-profiles(?:\?|$)/;
     const PLOT_ROOM_RE = /\/plots\/([^/]+)\/rooms\/([^/]+)\//;
@@ -48,24 +28,20 @@
     const PLOT_URL = (id) => `https://api.zeta-ai.io/v1/plots/${id}`;
 
     let mode = "persona"; // "persona" | "plot"
-    let plotData = null;          // {{char}}상세 모드: 서버에서 받은 전체 plot 객체 (참고/표시용 캐시)
-    let activePlotTargetKey = null; // "longDescription" | "narrator" | "char:{characterId}"
+    let plotData = null;
+    let activePlotTargetKey = null;
 
     const POS_KEY = "zeta-persona-editor-pos";
     const AUTOSAVE_KEY = "zeta-persona-editor-autosave";
 
     function getAutosaveEnabled() {
         const v = localStorage.getItem(AUTOSAVE_KEY);
-        return v === null ? true : v === "1"; // 기본값: 켜짐
+        return v === null ? true : v === "1";
     }
 
     function setAutosaveEnabled(on) {
         localStorage.setItem(AUTOSAVE_KEY, on ? "1" : "0");
     }
-
-    //------------------------------------------
-    // 위치 (전역)
-    //------------------------------------------
 
     function getPos() {
         try {
@@ -78,10 +54,6 @@
     function savePos(pos) {
         localStorage.setItem(POS_KEY, JSON.stringify(pos));
     }
-
-    //------------------------------------------
-    // 방(room) 감지 - SPA 라우팅 대응
-    //------------------------------------------
 
     function currentRoomId() {
         return location.pathname.split("/").pop();
@@ -101,14 +73,10 @@
         localStorage.setItem(plotIdKey(id), plotId);
     }
 
-    //------------------------------------------
-    // 실시간 훔쳐보기 상태
-    //------------------------------------------
-
     let capturedAuth = null;
     let lastPlotId = getCachedPlotId(roomId);
-    let personaList = [];      // 이 plotId의 전체 페르소나 목록
-    let activePersonaId = null; // 지금 편집 중인 페르소나 id
+    let personaList = [];
+    let activePersonaId = null;
 
     function sniffOutgoingUrl(url) {
         if (!url) return;
@@ -145,7 +113,7 @@
             const knownPlotId = getCachedPlotId(atRoomId);
 
             if (!knownPlotId || !urlPlotId || urlPlotId !== knownPlotId) return;
-            if (atRoomId !== roomId) return; // 지금 보고 있는 방이 아니면 UI 갱신 안 함
+            if (atRoomId !== roomId) return;
 
             const data = JSON.parse(text);
             const list = data && data.userChatProfiles;
@@ -160,10 +128,6 @@
             console.log("🩶 PersonaEditor: 목록 감지됨", atRoomId, list.length + "개");
         } catch { /* ignore */ }
     }
-
-    //------------------------------------------
-    // UI - Shadow DOM (회색 테마)
-    //------------------------------------------
 
     const host = document.createElement("div");
     host.id = "zeta-persona-editor-host";
@@ -408,10 +372,8 @@
         rebuildPersonaDropdown();
     }
 
-    //------------------------------------------
-    // {{char}} 상세(plot) 모드
-    //------------------------------------------
-
+    // {{char}} 상세(plot) 모드용 - 서버 응답 스키마가 바뀌어도 자동 대응하도록
+    // characters 배열만 별도 처리하고, 나머지 최상위 필드는 longDescription/narrator만 취급.
     function getPlotTargets(obj) {
         if (!obj) return [];
         const targets = [
@@ -488,10 +450,6 @@
 
     autosaveToggleEl.checked = getAutosaveEnabled();
     refreshRoomUI();
-
-    //------------------------------------------
-    // 패널 토글 (드래그와 클릭 구분)
-    //------------------------------------------
 
     let dragging = false;
     let moved = false;
@@ -573,10 +531,6 @@
         if (e.key === "Escape" && panelEl.classList.contains("open")) setPanelOpen(false);
     });
 
-    //------------------------------------------
-    // 자동저장 (1:1, 있는 그대로 덮어쓰기 — 중복/누적 없음)
-    //------------------------------------------
-
     let saveDebounce = null;
     let saveInFlight = false;
     let saveQueued = false;
@@ -614,7 +568,7 @@
             });
 
             if (res.ok) {
-                if (persona) persona.description = newDesc; // 로컬 캐시도 동기화 (중복 방지 핵심)
+                if (persona) persona.description = newDesc;
                 setSaveState("saved", "저장됨 ✅");
             } else {
                 const t = await res.text().catch(() => "");
@@ -635,27 +589,13 @@
         }
     }
 
-    // 실제로 성공했던 PUT 요청(Network 탭에서 캡처된 진짜 페이로드)에
-    // 있던 최상위 필드만 정확히 골라서 보낸다. GET 응답엔 이거 말고도
-    // 여분의 필드가 섞여있을 수 있는데, 그걸 그대로 보내면 서버가
-    // "Failed to read HTTP message"로 거부하는 것으로 보임.
-    const PLOT_PUT_FIELDS = [
-        "plotId", "chatProfiles", "shortDescription", "hashtags", "isAboutPublic", "about",
-        "isCreatorCommentPublic", "creatorComment", "isExampleConversationPublic",
-        "unlimitedMonitoringStatus", "unlimitedReExaminationCount", "unlimitedMonitoringCompletedAt",
-        "lorebookIds", "stylePreset", "infoBoxSetting", "cyoaSetting", "name",
-        "longDescription", "narrator", "characters", "intros", "exampleConversations"
-    ];
-
+    // ★★★ 핵심 수정: 화이트리스트로 필드를 고르지 않고,
+    // 서버에서 방금 받아온 fresh 객체를 그대로 통째로 복사해서 보낸다.
+    // (서버 스키마가 바뀌어도 항상 "받은 그대로 + 수정한 필드만" 유지되어 안전함)
     function buildPlotPutBody(fresh) {
-        const out = {};
-        PLOT_PUT_FIELDS.forEach(k => { if (k in fresh) out[k] = fresh[k]; });
-        return out;
+        return { ...fresh };
     }
 
-    // 깨진(escort 없는) UTF-16 서로게이트 문자를 제거한다 —
-    // 이게 남아있으면 UTF-8로 인코딩할 때 유효하지 않은 바이트가 되어
-    // 서버의 엄격한 JSON 파서가 "Failed to read HTTP message"로 거부함.
     function sanitizeSurrogates(str) {
         return str.replace(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?:[^\uD800-\uDBFF]|^)[\uDC00-\uDFFF]/g, (m) => m.length > 1 ? m[0] : "");
     }
@@ -678,8 +618,6 @@
         const targetKey = activePlotTargetKey;
 
         try {
-            // 저장 직전에 항상 서버 최신본을 다시 받아온다 — 이 필드 말고는
-            // 절대 안 건드리기 위한 안전장치 (다른 곳에서 그 사이 수정됐어도 보존됨).
             const fresh = await fetchPlotFresh();
             if (!fresh) {
                 setSaveState("error", "최신본 못 가져옴 ❌");
@@ -699,14 +637,14 @@
             const res = await originalFetch(PLOT_URL(lastPlotId), {
                 method: "PUT",
                 headers: {
-                    "Content-Type": "application/json; charset=UTF-8",
+                    "Content-Type": "application/json",
                     "Authorization": capturedAuth
                 },
                 body: bodyStr
             });
 
             if (res.ok) {
-                plotData = fresh; // 방금 저장한 상태를 그대로 로컬 캐시로 반영
+                plotData = fresh;
                 setSaveState("saved", "저장됨 ✅");
                 rebuildPlotDropdown();
             } else {
@@ -842,10 +780,6 @@
         applyPos(defaultPos);
     });
 
-    //------------------------------------------
-    // 방 이동 감지 (SPA 라우팅 대응) — 방 바뀌면 자동으로 그 방 페르소나로 전환
-    //------------------------------------------
-
     setInterval(() => {
         const id = currentRoomId();
         if (id !== roomId) {
@@ -863,10 +797,6 @@
             if (mode === "plot") refreshPlotData(false);
         }
     }, 1000);
-
-    //------------------------------------------
-    // fetch 훔쳐보기: 인증 헤더 + 페르소나 목록 응답 + plotId 캐치
-    //------------------------------------------
 
     const originalFetch = window.fetch;
 
@@ -899,10 +829,6 @@
 
         return res;
     };
-
-    //------------------------------------------
-    // XMLHttpRequest 훔쳐보기
-    //------------------------------------------
 
     const OrigXHR = window.XMLHttpRequest;
     const origOpen = OrigXHR.prototype.open;
@@ -943,10 +869,6 @@
 
         return origSend.call(this, body);
     };
-
-    //------------------------------------------
-    // Public API
-    //------------------------------------------
 
     window.ZetaPersonaEditor = {
         version: VERSION,
