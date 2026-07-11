@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Zeta Persona Quick Editor
 // @namespace    zeta-persona-editor
-// @version      1.5.0
-// @description  현재 방의 유저 페르소나 / {{char}} 상세 / 추천 대화 프로필(유저창·캐릭창)을 자동으로 불러와서, 페이지 이동 없이 바로 수정/자동저장하는 미니 에디터
+// @version      1.6.0
+// @description  현재 방의 유저 페르소나(+추천 프로필) / {{char}} 상세를 자동으로 불러와서, 페이지 이동 없이 바로 수정/자동저장하는 미니 에디터
 // @match        https://zeta-ai.io/*
 // @match        https://*.zeta-ai.io/*
 // @run-at       document-start
@@ -19,7 +19,7 @@
     }
     window.__ZETA_PERSONA_EDITOR_RUNNING__ = true;
 
-    const VERSION = "1.5.0";
+    const VERSION = "1.6.0";
 
     const PROFILES_LIST_RE = /\/v1\/user-chat-profiles(?:\?|$)/;
     const PLOT_ROOM_RE = /\/plots\/([^/]+)\/rooms\/([^/]+)\//;
@@ -29,12 +29,15 @@
     const PLOT_CREATOR_URL = (id) => `https://api.zeta-ai.io/v1/plots/${id}/creator`;
     const ROOM_URL = (id) => `https://api.zeta-ai.io/v1/rooms/${id}`;
     const REC_PATCH_URL = (roomId) => `https://api.zeta-ai.io/v1/rooms/${roomId}/user-plot-chat-profiles/me`;
+    const REC_KEY_PREFIX = "rec:";
 
-    let mode = "persona"; // "persona" | "plot" | "rec"
+    function isRecKey(key) { return typeof key === "string" && key.indexOf(REC_KEY_PREFIX) === 0; }
+    function recIdFromKey(key) { return key.slice(REC_KEY_PREFIX.length); }
+
+    let mode = "persona"; // "persona" | "plot"
     let plotData = null;          // /creator 전체 응답 (draft 포함) 캐시
     let activePlotTargetKey = null;
     let recRoomData = null;       // /rooms/{roomId} 전체 응답 캐시 (추천 프로필용)
-    let activeRecProfileId = null;
 
     const POS_KEY = "zeta-persona-editor-pos";
     const AUTOSAVE_KEY = "zeta-persona-editor-autosave";
@@ -81,7 +84,7 @@
     let capturedAuth = null;
     let lastPlotId = getCachedPlotId(roomId);
     let personaList = [];
-    let activePersonaId = null;
+    let activePersonaId = null; // 실제 persona id 또는 "rec:"+chatProfileId
 
     function sniffOutgoingUrl(url) {
         if (!url) return;
@@ -125,9 +128,9 @@
             if (!Array.isArray(list)) return;
 
             personaList = list;
-            const sel = list.find(p => p && p.selected);
-            if (sel && sel.id && !userPickedManually) {
-                loadPersonaIntoEditor(sel.id);
+            if (!userPickedManually && !activePersonaId) {
+                const sel = list.find(p => p && p.selected);
+                if (sel && sel.id) loadPersonaIntoEditor(sel.id);
             }
             rebuildPersonaDropdown();
             console.log("🩶 PersonaEditor: 목록 감지됨", atRoomId, list.length + "개");
@@ -187,7 +190,7 @@
   select {
     width: 100%; background: #17181a; color: #fff;
     border: 1px solid #555; border-radius: 8px; padding: 7px 8px;
-    font-size: 11px; margin-top: 6px;
+    font-size: 12px; margin-top: 6px;
   }
 
   textarea {
@@ -199,7 +202,7 @@
   .row { display: flex; gap: 6px; margin-top: 8px; align-items: center; }
   button {
     background: #3a3b3e; color: #fff; border: none; border-radius: 8px;
-    padding: 7px 4px; font-size: 10.5px; cursor: pointer; flex: 1;
+    padding: 7px 6px; font-size: 11px; cursor: pointer; flex: 1;
   }
   button.primary { background: #6b6f76; }
   button.mode-btn.active { background: #8a8f98; font-weight: bold; }
@@ -241,7 +244,6 @@
   <div class="row" style="margin-top:0;">
     <button class="mode-btn active" id="mode-persona">{{user}}</button>
     <button class="mode-btn" id="mode-plot">{{char}}</button>
-    <button class="mode-btn" id="mode-rec">추천</button>
   </div>
 
   <div class="status" id="status" style="margin-top:8px;">감지 중...</div>
@@ -291,7 +293,6 @@
     const manualSaveBtn = el("manual-save");
     const modePersonaBtn = el("mode-persona");
     const modePlotBtn = el("mode-plot");
-    const modeRecBtn = el("mode-rec");
 
     const BTN_SIZE = 32;
     const BTN_MARGIN = 4;
@@ -307,7 +308,7 @@
 
     // 현재 편집 중인 필드의 글자수 제한 (없으면 null)
     function currentFieldLimit() {
-        if (mode === "rec") return 500;
+        if (mode === "persona" && isRecKey(activePersonaId)) return 500;
         if (mode === "plot" && activePlotTargetKey && activePlotTargetKey.indexOf("chatprofile:") === 0) return 500;
         return null;
     }
@@ -344,11 +345,12 @@
         return obj && obj.draft ? obj.draft : null;
     }
 
+    // 추천 프로필(유저창) 목록 — /rooms/{roomId} 응답의 plot.chatProfiles 기준
     function getRecTargets(roomData) {
         const list = (roomData && roomData.plot && roomData.plot.chatProfiles) || [];
         return list.map(cp => ({
             key: cp.id,
-            label: `🌟 추천 프로필(유저창): ${cp.name || "이름없음"}`,
+            label: `🌟 추천프로필: ${cp.name || "이름없음"}`,
             get: () => cp.description || ""
         }));
     }
@@ -357,30 +359,17 @@
         if (!capturedAuth) {
             statusEl.className = "status bad";
             statusEl.textContent = "⚠ 인증 토큰 아직 못 잡음 (사이트 조작 한번 해보세요)";
-        } else if (!lastPlotId && mode !== "rec") {
+        } else if (!lastPlotId) {
             statusEl.className = "status bad";
             statusEl.textContent = "⚠ 이 방의 plotId 못 잡음 (새로고침 해보세요)";
         } else if (mode === "persona") {
-            if (personaList.length === 0) {
+            const recCount = getRecTargets(recRoomData).length;
+            if (personaList.length === 0 && recCount === 0) {
                 statusEl.className = "status bad";
-                statusEl.textContent = "⚠ 페르소나 목록 아직 못 잡음 → '새로고침' 눌러주세요";
+                statusEl.textContent = "⚠ 목록 아직 못 잡음 → '새로고침' 눌러주세요";
             } else {
                 statusEl.className = "status ok";
-                statusEl.textContent = `✅ 페르소나 ${personaList.length}개 로드됨`;
-            }
-        } else if (mode === "rec") {
-            if (!recRoomData) {
-                statusEl.className = "status bad";
-                statusEl.textContent = "⚠ 추천 프로필 아직 못 불러옴 → '새로고침' 눌러주세요";
-            } else {
-                const targets = getRecTargets(recRoomData);
-                if (!targets.length) {
-                    statusEl.className = "status bad";
-                    statusEl.textContent = "⚠ 이 방엔 추천 프로필이 없음";
-                } else {
-                    statusEl.className = "status ok";
-                    statusEl.textContent = `✅ 추천 프로필(유저창) 로드됨 · 500자 제한`;
-                }
+                statusEl.textContent = `✅ 추천 ${recCount}개 + 내 페르소나 ${personaList.length}개 로드됨`;
             }
         } else {
             const draft = getDraft(plotData);
@@ -398,14 +387,21 @@
         }
         btnEl.classList.toggle("no-auth", !capturedAuth);
         btnEl.classList.toggle("ready", !!(capturedAuth && (
-            mode === "persona" ? personaList.length :
-            mode === "rec" ? getRecTargets(recRoomData).length :
-            getDraft(plotData)
+            mode === "persona" ? (personaList.length || getRecTargets(recRoomData).length) : getDraft(plotData)
         )));
     }
 
+    // {{user}} 탭 드롭다운 = 추천 프로필(있으면 먼저) + 내 페르소나 목록
     function rebuildPersonaDropdown() {
         selectEl.innerHTML = "";
+        const recTargets = getRecTargets(recRoomData);
+        recTargets.forEach(t => {
+            const opt = document.createElement("option");
+            opt.value = REC_KEY_PREFIX + t.key;
+            opt.textContent = `${t.label} (${t.get().length}/500자)`;
+            if (opt.value === activePersonaId) opt.selected = true;
+            selectEl.appendChild(opt);
+        });
         personaList.forEach(p => {
             const opt = document.createElement("option");
             opt.value = p.id;
@@ -418,10 +414,21 @@
 
     let userPickedManually = false;
 
-    function loadPersonaIntoEditor(id) {
-        const p = personaList.find(x => x.id === id);
+    function loadPersonaIntoEditor(key) {
+        if (isRecKey(key)) {
+            const recId = recIdFromKey(key);
+            const t = getRecTargets(recRoomData).find(x => x.key === recId);
+            if (!t) return;
+            activePersonaId = key;
+            descEl.value = t.get();
+            updateCount();
+            setSaveState("idle", "대기중"); clearErrorDetail();
+            rebuildPersonaDropdown();
+            return;
+        }
+        const p = personaList.find(x => x.id === key);
         if (!p) return;
-        activePersonaId = id;
+        activePersonaId = key;
         descEl.value = p.description || "";
         updateCount();
         setSaveState("idle", "대기중"); clearErrorDetail();
@@ -429,7 +436,7 @@
     }
 
     //------------------------------------------
-    // 추천 프로필(유저창) 모드 — /rooms/{roomId} 기준으로 동작
+    // 추천 프로필(유저창) 데이터 로딩 — /rooms/{roomId} 기준
     //------------------------------------------
 
     async function fetchRoomFresh() {
@@ -445,48 +452,10 @@
         }
     }
 
-    function rebuildRecDropdown() {
-        const targets = getRecTargets(recRoomData);
-        selectEl.innerHTML = "";
-        targets.forEach(t => {
-            const opt = document.createElement("option");
-            opt.value = t.key;
-            opt.textContent = `${t.label} (${t.get().length}/500자)`;
-            if (t.key === activeRecProfileId) opt.selected = true;
-            selectEl.appendChild(opt);
-        });
-        updateStatus();
-    }
-
-    function loadRecIntoEditor(key) {
-        const targets = getRecTargets(recRoomData);
-        const t = targets.find(x => x.key === key);
-        if (!t) return;
-        activeRecProfileId = key;
-        descEl.value = t.get();
-        updateCount();
-        setSaveState("idle", "대기중"); clearErrorDetail();
-        rebuildRecDropdown();
-    }
-
-    async function refreshRecData(preserveTarget) {
+    async function refreshRecData() {
         const fresh = await fetchRoomFresh();
-        if (!fresh || !fresh.plot) {
-            setSaveState("error", "불러오기 실패 ❌");
-            return false;
-        }
+        if (!fresh || !fresh.plot) return false;
         recRoomData = fresh;
-        const targets = getRecTargets(fresh);
-        if (preserveTarget && targets.find(t => t.key === activeRecProfileId)) {
-            loadRecIntoEditor(activeRecProfileId);
-        } else if (targets.length) {
-            loadRecIntoEditor(targets[0].key);
-        } else {
-            selectEl.innerHTML = "<option>추천 프로필 없음</option>";
-            descEl.value = "";
-            updateCount();
-        }
-        updateStatus();
         return true;
     }
 
@@ -525,8 +494,8 @@
         getPlotTargets(draft).forEach(t => {
             const opt = document.createElement("option");
             opt.value = t.key;
-            const limit = t.key.indexOf("chatprofile:") === 0 ? "/500" : "";
-            opt.textContent = `${t.label} (${t.get(draft).length}${limit}자)`;
+            const limitTxt = t.key.indexOf("chatprofile:") === 0 ? "/500" : "";
+            opt.textContent = `${t.label} (${t.get(draft).length}${limitTxt}자)`;
             if (t.key === activePlotTargetKey) opt.selected = true;
             selectEl.appendChild(opt);
         });
@@ -647,9 +616,25 @@
         window.addEventListener("mouseup", onDragEnd);
     }
 
-    function setPanelOpen(open) {
+    async function setPanelOpen(open) {
         panelEl.classList.toggle("open", open);
-        if (open) refreshRoomUI();
+        if (open) {
+            refreshRoomUI();
+            // 패널을 처음 열 때, persona 모드인데 추천 프로필 데이터가 없으면 자동으로 한번 불러온다
+            if (mode === "persona" && !recRoomData && capturedAuth && roomId) {
+                const ok = await refreshRecData();
+                if (ok) {
+                    rebuildPersonaDropdown();
+                    if (!activePersonaId) {
+                        const recTargets = getRecTargets(recRoomData);
+                        if (recTargets.length) {
+                            loadPersonaIntoEditor(REC_KEY_PREFIX + recTargets[0].key);
+                        }
+                    }
+                    updateStatus();
+                }
+            }
+        }
     }
 
     document.addEventListener("click", (e) => {
@@ -667,13 +652,15 @@
     let saveQueued = false;
 
     async function doAutoSave() {
-        if (mode === "persona") return doAutoSavePersona();
-        if (mode === "rec") return doAutoSaveRec();
+        if (mode === "persona") {
+            if (isRecKey(activePersonaId)) return doAutoSaveRec();
+            return doAutoSavePersona();
+        }
         return doAutoSavePlot();
     }
 
     async function doAutoSavePersona() {
-        if (!activePersonaId) return;
+        if (!activePersonaId || isRecKey(activePersonaId)) return;
         if (!capturedAuth) {
             setSaveState("error", "인증 없음 ❌");
             return;
@@ -723,7 +710,7 @@
 
     // 추천 프로필(유저창) 저장 — PATCH /v1/rooms/{roomId}/user-plot-chat-profiles/me
     async function doAutoSaveRec() {
-        if (!activeRecProfileId) return;
+        if (!isRecKey(activePersonaId)) return;
         if (!capturedAuth) {
             setSaveState("error", "인증 없음 ❌");
             return;
@@ -736,6 +723,7 @@
         setSaveState("saving", "저장 중...");
         clearErrorDetail();
 
+        const recId = recIdFromKey(activePersonaId);
         const newDesc = descEl.value;
 
         try {
@@ -750,11 +738,11 @@
 
             if (res.ok) {
                 if (recRoomData && recRoomData.plot && Array.isArray(recRoomData.plot.chatProfiles)) {
-                    const cp = recRoomData.plot.chatProfiles.find(c => c.id === activeRecProfileId);
+                    const cp = recRoomData.plot.chatProfiles.find(c => c.id === recId);
                     if (cp) cp.description = newDesc;
                 }
                 setSaveState("saved", "저장됨 ✅");
-                rebuildRecDropdown();
+                rebuildPersonaDropdown();
             } else {
                 const t = await res.text().catch(() => "");
                 let friendly = `실패 ❌ (HTTP ${res.status})`;
@@ -915,15 +903,14 @@
 
     selectEl.addEventListener("change", () => {
         const hasUnsaved = saveStateEl.textContent.includes("저장 필요") || saveStateEl.textContent.includes("입력 중");
-        if ((mode === "plot" || mode === "rec") && hasUnsaved && !confirm("저장 안 된 수정사항이 있어요. 그냥 다른 항목으로 바꿀까요? (지금 내용은 사라져요)")) {
-            selectEl.value = mode === "rec" ? activeRecProfileId : activePlotTargetKey;
+        const isLimitedTarget = mode === "plot" || (mode === "persona" && isRecKey(selectEl.value));
+        if (isLimitedTarget && hasUnsaved && !confirm("저장 안 된 수정사항이 있어요. 그냥 다른 항목으로 바꿀까요? (지금 내용은 사라져요)")) {
+            selectEl.value = mode === "persona" ? activePersonaId : activePlotTargetKey;
             return;
         }
         if (mode === "persona") {
             userPickedManually = true;
             loadPersonaIntoEditor(selectEl.value);
-        } else if (mode === "rec") {
-            loadRecIntoEditor(selectEl.value);
         } else {
             loadPlotTargetIntoEditor(selectEl.value);
         }
@@ -934,27 +921,29 @@
         mode = newMode;
         modePersonaBtn.classList.toggle("active", mode === "persona");
         modePlotBtn.classList.toggle("active", mode === "plot");
-        modeRecBtn.classList.toggle("active", mode === "rec");
         clearTimeout(saveDebounce);
 
         if (mode === "persona") {
-            if (personaList.length) {
+            if (!recRoomData && capturedAuth && roomId) {
+                await refreshRecData();
+            }
+            if (personaList.length || getRecTargets(recRoomData).length) {
                 rebuildPersonaDropdown();
-                if (activePersonaId) loadPersonaIntoEditor(activePersonaId);
+                if (activePersonaId) {
+                    loadPersonaIntoEditor(activePersonaId);
+                } else {
+                    const recTargets = getRecTargets(recRoomData);
+                    if (recTargets.length) {
+                        loadPersonaIntoEditor(REC_KEY_PREFIX + recTargets[0].key);
+                    } else {
+                        const sel = personaList.find(p => p.selected) || personaList[0];
+                        if (sel) loadPersonaIntoEditor(sel.id);
+                    }
+                }
             } else {
                 selectEl.innerHTML = "<option>새로고침 눌러주세요</option>";
                 descEl.value = "";
                 updateCount();
-            }
-        } else if (mode === "rec") {
-            if (recRoomData) {
-                rebuildRecDropdown();
-                if (activeRecProfileId) loadRecIntoEditor(activeRecProfileId);
-            } else {
-                selectEl.innerHTML = "<option>불러오는 중...</option>";
-                descEl.value = "";
-                updateCount();
-                await refreshRecData(false);
             }
         } else {
             if (getDraft(plotData)) {
@@ -972,7 +961,6 @@
 
     modePersonaBtn.addEventListener("click", () => switchMode("persona"));
     modePlotBtn.addEventListener("click", () => switchMode("plot"));
-    modeRecBtn.addEventListener("click", () => switchMode("rec"));
 
     el("refresh").addEventListener("click", async () => {
         if (mode === "persona") {
@@ -987,19 +975,23 @@
                     const data = await res.json();
                     if (Array.isArray(data.userChatProfiles)) {
                         personaList = data.userChatProfiles;
-                        if (!activePersonaId || !personaList.find(p => p.id === activePersonaId)) {
-                            const sel = personaList.find(p => p.selected);
-                            if (sel) loadPersonaIntoEditor(sel.id);
-                        }
-                        rebuildPersonaDropdown();
                     }
                 }
             } catch (err) {
                 console.error("🩶 PersonaEditor 새로고침 실패:", err);
             }
+            await refreshRecData();
+            if (!activePersonaId) {
+                const recTargets = getRecTargets(recRoomData);
+                if (recTargets.length) {
+                    loadPersonaIntoEditor(REC_KEY_PREFIX + recTargets[0].key);
+                } else {
+                    const sel = personaList.find(p => p.selected);
+                    if (sel) loadPersonaIntoEditor(sel.id);
+                }
+            }
+            rebuildPersonaDropdown();
             updateStatus();
-        } else if (mode === "rec") {
-            await refreshRecData(true);
         } else {
             await refreshPlotData(true);
         }
@@ -1022,13 +1014,14 @@
             plotData = null;
             activePlotTargetKey = null;
             recRoomData = null;
-            activeRecProfileId = null;
             selectEl.innerHTML = "<option>불러오는 중...</option>";
             descEl.value = "";
             updateCount();
             refreshRoomUI();
             if (mode === "plot") refreshPlotData(false);
-            if (mode === "rec") refreshRecData(false);
+            if (mode === "persona") {
+                refreshRecData().then(() => { rebuildPersonaDropdown(); updateStatus(); });
+            }
         }
     }, 1000);
 
@@ -1113,7 +1106,6 @@
         get plotData() { return plotData; },
         get activePlotTargetKey() { return activePlotTargetKey; },
         get recRoomData() { return recRoomData; },
-        get activeRecProfileId() { return activeRecProfileId; },
         get hasAuth() { return !!capturedAuth; }
     };
 
