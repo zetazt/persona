@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Zeta Persona Quick Editor
 // @namespace    zeta-persona-editor
-// @version      1.2.0
+// @version      1.3.0
 // @description  현재 방의 유저 페르소나를 자동으로 불러와서, 페이지 이동 없이 바로 수정/자동저장하는 미니 에디터
 // @match        https://zeta-ai.io/*
 // @match        https://*.zeta-ai.io/*
@@ -14,7 +14,7 @@
     "use strict";
 
     // ==========================
-    // Zeta Persona Quick Editor v1.2.0
+    // Zeta Persona Quick Editor v1.3.0
     //
     // 원리:
     // - 유저노트/마커/base+note 조합 없음. 그냥 필드 값을 있는 그대로
@@ -39,7 +39,7 @@
     }
     window.__ZETA_PERSONA_EDITOR_RUNNING__ = true;
 
-    const VERSION = "1.2.0";
+    const VERSION = "1.3.0";
 
     const PROFILES_LIST_RE = /\/v1\/user-chat-profiles(?:\?|$)/;
     const PLOT_ROOM_RE = /\/plots\/([^/]+)\/rooms\/([^/]+)\//;
@@ -251,7 +251,7 @@
   hr { border: none; border-top: 1px solid #3a3b3e; margin: 10px 0; }
 </style>
 
-<div id="btn"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg><span class="dot"></span></div>
+<div id="btn"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg><span class="dot"></span></div>
 <div id="panel">
   <div class="title">
     <span>Persona Editor</span>
@@ -260,11 +260,11 @@
   <div class="room" id="room"></div>
 
   <div class="row" style="margin-top:0;">
-    <button class="mode-btn active" id="mode-persona">유저 페르소나</button>
-    <button class="mode-btn" id="mode-plot">{{char}} 상세</button>
+    <button class="mode-btn active" id="mode-persona">{{user}}</button>
+    <button class="mode-btn" id="mode-plot">{{char}}</button>
   </div>
 
-  <div class="status" id="status">감지 중...</div>
+  <div class="status" id="status" style="margin-top:8px;">감지 중...</div>
 
   <select id="target-select"><option>불러오는 중...</option></select>
 
@@ -350,8 +350,12 @@
                 statusEl.className = "status bad";
                 statusEl.textContent = "⚠ {{char}} 상세 아직 못 불러옴 → '새로고침' 눌러주세요";
             } else {
+                const total = getPlotTargets(plotData).reduce((sum, t) => {
+                    const len = t.key === activePlotTargetKey ? descEl.value.length : t.get(plotData).length;
+                    return sum + len;
+                }, 0);
                 statusEl.className = "status ok";
-                statusEl.textContent = `✅ ${plotData.name || "(이름없음)"} 상세 로드됨 · 기본설정+나레이터+캐릭터 합쳐 1200자 제한 있음`;
+                statusEl.textContent = `✅ ${plotData.name || "(이름없음)"} 상세 로드됨 · 합계 ${total}자 (기본+나레+캐릭)`;
             }
         }
         btnEl.classList.toggle("no-auth", !capturedAuth);
@@ -675,6 +679,7 @@
 
     descEl.addEventListener("input", () => {
         updateCount();
+        updateStatus();
         if (getAutosaveEnabled()) {
             setSaveState("idle", "입력 중...");
             clearTimeout(saveDebounce);
