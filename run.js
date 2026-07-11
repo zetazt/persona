@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Zeta Persona Quick Editor
 // @namespace    zeta-persona-editor
-// @version      1.4.2
+// @version      1.4.3
 // @description  현재 방의 유저 페르소나를 자동으로 불러와서, 페이지 이동 없이 바로 수정/자동저장하는 미니 에디터
 // @match        https://zeta-ai.io/*
 // @match        https://*.zeta-ai.io/*
@@ -14,7 +14,7 @@
     "use strict";
 
     // ==========================
-    // Zeta Persona Quick Editor v1.4.2
+    // Zeta Persona Quick Editor v1.4.3
     //
     // 원리:
     // - 유저노트/마커/base+note 조합 없음. 그냥 필드 값을 있는 그대로
@@ -39,7 +39,7 @@
     }
     window.__ZETA_PERSONA_EDITOR_RUNNING__ = true;
 
-    const VERSION = "1.4.2";
+    const VERSION = "1.4.3";
 
     const PROFILES_LIST_RE = /\/v1\/user-chat-profiles(?:\?|$)/;
     const PLOT_ROOM_RE = /\/plots\/([^/]+)\/rooms\/([^/]+)\//;
@@ -653,6 +653,13 @@
         return out;
     }
 
+    // 깨진(escort 없는) UTF-16 서로게이트 문자를 제거한다 —
+    // 이게 남아있으면 UTF-8로 인코딩할 때 유효하지 않은 바이트가 되어
+    // 서버의 엄격한 JSON 파서가 "Failed to read HTTP message"로 거부함.
+    function sanitizeSurrogates(str) {
+        return str.replace(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?:[^\uD800-\uDBFF]|^)[\uDC00-\uDFFF]/g, (m) => m.length > 1 ? m[0] : "");
+    }
+
     async function doAutoSavePlot() {
         if (!activePlotTargetKey) return;
         if (!capturedAuth || !lastPlotId) {
@@ -687,7 +694,7 @@
             }
             target.set(fresh, newText);
 
-            const bodyStr = JSON.stringify(buildPlotPutBody(fresh));
+            const bodyStr = sanitizeSurrogates(JSON.stringify(buildPlotPutBody(fresh)));
 
             const res = await originalFetch(PLOT_URL(lastPlotId), {
                 method: "PUT",
