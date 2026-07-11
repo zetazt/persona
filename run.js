@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Zeta Persona Quick Editor
 // @namespace    zeta-persona-editor
-// @version      1.8.0
+// @version      1.9.0
 // @description  현재 방의 유저 페르소나(+추천 프로필) / {{char}} 상세를 자동으로 불러와서, 페이지 이동 없이 바로 수정/자동저장하는 미니 에디터
 // @match        https://zeta-ai.io/*
 // @match        https://*.zeta-ai.io/*
@@ -19,13 +19,14 @@
     }
     window.__ZETA_PERSONA_EDITOR_RUNNING__ = true;
 
-    const VERSION = "1.8.0";
+    const VERSION = "1.9.0";
 
     const PROFILES_LIST_RE = /\/v1\/user-chat-profiles(?:\?|$)/;
     const PLOT_ROOM_RE = /\/plots\/([^/]+)\/rooms\/([^/]+)\//;
     const PLOTID_QUERY_RE = /[?&]plotId=([^&]+)/;
     const PROFILE_PATCH_URL = (id) => `https://api.zeta-ai.io/v1/user-chat-profiles/${id}`;
     const PLOT_URL = (id) => `https://api.zeta-ai.io/v1/plots/${id}`;
+    const PLOT_STATUS_URL = (id) => `https://api.zeta-ai.io/v1/plots/${id}/status`;
     const PLOT_CREATOR_URL = (id) => `https://api.zeta-ai.io/v1/plots/${id}/creator`;
     const ROOM_URL = (id) => `https://api.zeta-ai.io/v1/rooms/${id}`;
     const REC_PATCH_URL = (roomId) => `https://api.zeta-ai.io/v1/rooms/${roomId}/user-plot-chat-profiles/me`;
@@ -82,7 +83,6 @@
         localStorage.setItem(plotIdKey(id), plotId);
     }
 
-    // 방(roomId)별로 마지막에 선택했던 {{user}} 탭 항목(내 페르소나 id 또는 "rec:"+추천프로필id)을 기억해둔다.
     function personaSelectionKey(id) {
         return `zeta-persona-editor-lastpersona-${id}`;
     }
@@ -98,7 +98,7 @@
     let capturedAuth = null;
     let lastPlotId = getCachedPlotId(roomId);
     let personaList = [];
-    let activePersonaId = null; // 실제 persona id 또는 "rec:"+chatProfileId
+    let activePersonaId = null;
 
     function sniffOutgoingUrl(url) {
         if (!url) return;
@@ -320,7 +320,6 @@
 
     applyPos(getPos());
 
-    // 현재 편집 중인 필드의 글자수 제한 (없으면 null)
     function currentFieldLimit() {
         if (mode === "persona" && isRecKey(activePersonaId)) return 500;
         return null;
@@ -353,14 +352,10 @@
         errorDetailEl.classList.remove("show");
     }
 
-    // plotData는 /creator 응답 전체. 실제 편집 대상은 plotData.draft 안에 있음.
     function getDraft(obj) {
         return obj && obj.draft ? obj.draft : null;
     }
 
-    // 추천 프로필(유저창) 목록 — 이름/이미지는 /rooms/{roomId} 응답의 plot.chatProfiles 기준,
-    // 실제 설명(description)은 /rooms/{roomId}/user-plot-chat-profiles/me 응답(recMeData)이 있으면 그걸 우선 사용한다.
-    // (recMeData.plotChatProfileId가 해당 프로필과 일치할 때만 유저창 값으로 간주)
     function getRecTargets(roomData) {
         const list = (roomData && roomData.plot && roomData.plot.chatProfiles) || [];
         return list.map(cp => ({
@@ -411,8 +406,6 @@
         )));
     }
 
-    // {{user}} 탭 드롭다운 = 추천 프로필(있으면 먼저) + 내 페르소나 목록
-    // 페르소나 탭 안의 모든 항목은 전부 500자 제한이라 굳이 "/500자"를 표시하지 않는다.
     function rebuildPersonaDropdown() {
         selectEl.innerHTML = "";
         const recTargets = getRecTargets(recRoomData);
@@ -458,8 +451,6 @@
         rebuildPersonaDropdown();
     }
 
-    // 저장된(이전에 선택했던) 항목이 지금 로드된 데이터 안에 있으면 그걸로 자동 선택한다.
-    // 사용자가 이번 세션에서 이미 직접 다른 항목을 골랐다면(userPickedManually) 덮어쓰지 않는다.
     function tryApplySavedPersonaSelection() {
         if (userPickedManually) return false;
         const saved = getSavedPersonaSelection(roomId);
@@ -477,12 +468,6 @@
         }
         return false;
     }
-
-    //------------------------------------------
-    // 추천 프로필(유저창) 데이터 로딩
-    // - /rooms/{roomId} : 프로필 이름/이미지/id 목록용
-    // - /rooms/{roomId}/user-plot-chat-profiles/me : 실제 유저창 설명(description)
-    //------------------------------------------
 
     async function fetchRoomFresh() {
         if (!capturedAuth) return null;
@@ -514,13 +499,9 @@
         const [fresh, me] = await Promise.all([fetchRoomFresh(), fetchRecMeFresh()]);
         if (!fresh || !fresh.plot) return false;
         recRoomData = fresh;
-        recMeData = me; // 못 가져와도(null) 캐릭창 설명으로 폴백되니 괜찮음
+        recMeData = me;
         return true;
     }
-
-    //------------------------------------------
-    // {{char}} 상세(plot) 모드 — draft 객체 기준으로 동작
-    //------------------------------------------
 
     function getPlotTargets(draft) {
         if (!draft) return [];
@@ -670,7 +651,6 @@
         panelEl.classList.toggle("open", open);
         if (open) {
             refreshRoomUI();
-            // 패널을 처음 열 때, persona 모드인데 추천 프로필 데이터가 없으면 자동으로 한번 불러온다
             if (mode === "persona" && !recRoomData && capturedAuth && roomId) {
                 const ok = await refreshRecData();
                 if (ok) {
@@ -758,9 +738,6 @@
         }
     }
 
-    // 추천 프로필(유저창) 저장 — PATCH /v1/rooms/{roomId}/user-plot-chat-profiles/me
-    // 응답 body에 갱신된 유저창 description이 그대로 들어있으므로, 이를 recMeData에 반영해서
-    // 이후 "불러오기"에서도 곧바로 최신 유저창 값이 보이도록 한다.
     async function doAutoSaveRec() {
         if (!isRecKey(activePersonaId)) return;
         if (!capturedAuth) {
@@ -818,12 +795,6 @@
         }
     }
 
-    // ★★★ 핵심 수정 (v1.4.5):
-    // /creator 응답의 draft 객체가 편집 폼 데이터와 거의 동일한 구조라는 것을 확인.
-    // draft를 기반으로 PUT 바디를 구성하되, draft 밖에 있는 몇몇 메타 필드
-    // (plotId, unlimitedMonitoring*)를 최상위 fresh 객체에서 보충한다.
-    // exampleConversation(단수, draft) → exampleConversations(복수, PUT 요구 필드명)로 매핑.
-    // chatProfiles(추천 프로필 캐릭창 쪽)도 draft에 포함되어 있어 그대로 전달.
     function buildPlotPutBody(fresh) {
         const draft = fresh.draft || {};
         return {
@@ -902,7 +873,33 @@
 
             if (res.ok) {
                 plotData = fresh;
-                setSaveState("saved", "저장됨 ✅");
+
+                // draft 저장만으로는 실제 반영이 안 되고 "임시저장" 상태로 남는다.
+                // 실제 화면(대화)에 반영되려면 이 status API로 RELEASE를 한 번 더 보내야 한다.
+                setSaveState("saving", "저장됨, 반영 중...");
+                try {
+                    const relRes = await originalFetch(PLOT_STATUS_URL(lastPlotId), {
+                        method: "PATCH",
+                        headers: {
+                            "Content-Type": "application/json",
+                            "Authorization": capturedAuth
+                        },
+                        body: JSON.stringify({ status: "RELEASE" })
+                    });
+                    if (relRes.ok) {
+                        setSaveState("saved", "저장+반영 완료 ✅");
+                    } else {
+                        const relT = await relRes.text().catch(() => "");
+                        setSaveState("error", `저장은 됐지만 반영 실패 ❌ (HTTP ${relRes.status})`);
+                        showErrorDetail("[반영(RELEASE) 실패]\n" + (relT || "(응답 본문 없음)"));
+                        console.error("🩶 PersonaEditor(plot) 반영 실패:", relRes.status, relT);
+                    }
+                } catch (relErr) {
+                    setSaveState("error", "저장은 됐지만 반영 중 네트워크 오류 ❌");
+                    showErrorDetail("[반영(RELEASE) 오류] " + String(relErr && relErr.message));
+                    console.error("🩶 PersonaEditor(plot) 반영 네트워크 오류:", relErr);
+                }
+
                 rebuildPlotDropdown();
             } else {
                 const t = await res.text().catch(() => "");
