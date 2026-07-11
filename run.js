@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Zeta Persona Quick Editor
 // @namespace    zeta-persona-editor
-// @version      1.4.0
+// @version      1.4.1
 // @description  현재 방의 유저 페르소나를 자동으로 불러와서, 페이지 이동 없이 바로 수정/자동저장하는 미니 에디터
 // @match        https://zeta-ai.io/*
 // @match        https://*.zeta-ai.io/*
@@ -14,7 +14,7 @@
     "use strict";
 
     // ==========================
-    // Zeta Persona Quick Editor v1.4.0
+    // Zeta Persona Quick Editor v1.4.1
     //
     // 원리:
     // - 유저노트/마커/base+note 조합 없음. 그냥 필드 값을 있는 그대로
@@ -39,7 +39,7 @@
     }
     window.__ZETA_PERSONA_EDITOR_RUNNING__ = true;
 
-    const VERSION = "1.4.0";
+    const VERSION = "1.4.1";
 
     const PROFILES_LIST_RE = /\/v1\/user-chat-profiles(?:\?|$)/;
     const PLOT_ROOM_RE = /\/plots\/([^/]+)\/rooms\/([^/]+)\//;
@@ -669,13 +669,15 @@
             }
             target.set(fresh, newText);
 
+            const bodyStr = JSON.stringify(fresh);
+
             const res = await originalFetch(PLOT_URL(lastPlotId), {
                 method: "PUT",
                 headers: {
-                    "Content-Type": "application/json",
+                    "Content-Type": "application/json; charset=UTF-8",
                     "Authorization": capturedAuth
                 },
-                body: JSON.stringify(fresh)
+                body: bodyStr
             });
 
             if (res.ok) {
@@ -689,7 +691,7 @@
                     friendly = "실패 ❌ 글자수 제한 초과";
                 }
                 setSaveState("error", friendly);
-                showErrorDetail(t || "(응답 본문 없음)");
+                showErrorDetail((t || "(응답 본문 없음)") + `\n\n[전송 body 길이: ${bodyStr.length}자]`);
                 console.error("🩶 PersonaEditor(plot) 저장 실패:", res.status, t);
             }
         } catch (err) {
