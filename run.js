@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Zeta Persona Quick Editor
 // @namespace    zeta-persona-editor
-// @version      1.4.5
-// @description  현재 방의 유저 페르소나를 자동으로 불러와서, 페이지 이동 없이 바로 수정/자동저장하는 미니 에디터
+// @version      1.5.0
+// @description  현재 방의 유저 페르소나 / {{char}} 상세 / 추천 대화 프로필(유저창·캐릭창)을 자동으로 불러와서, 페이지 이동 없이 바로 수정/자동저장하는 미니 에디터
 // @match        https://zeta-ai.io/*
 // @match        https://*.zeta-ai.io/*
 // @run-at       document-start
@@ -19,7 +19,7 @@
     }
     window.__ZETA_PERSONA_EDITOR_RUNNING__ = true;
 
-    const VERSION = "1.4.5";
+    const VERSION = "1.5.0";
 
     const PROFILES_LIST_RE = /\/v1\/user-chat-profiles(?:\?|$)/;
     const PLOT_ROOM_RE = /\/plots\/([^/]+)\/rooms\/([^/]+)\//;
@@ -27,10 +27,14 @@
     const PROFILE_PATCH_URL = (id) => `https://api.zeta-ai.io/v1/user-chat-profiles/${id}`;
     const PLOT_URL = (id) => `https://api.zeta-ai.io/v1/plots/${id}`;
     const PLOT_CREATOR_URL = (id) => `https://api.zeta-ai.io/v1/plots/${id}/creator`;
+    const ROOM_URL = (id) => `https://api.zeta-ai.io/v1/rooms/${id}`;
+    const REC_PATCH_URL = (roomId) => `https://api.zeta-ai.io/v1/rooms/${roomId}/user-plot-chat-profiles/me`;
 
-    let mode = "persona"; // "persona" | "plot"
+    let mode = "persona"; // "persona" | "plot" | "rec"
     let plotData = null;          // /creator 전체 응답 (draft 포함) 캐시
     let activePlotTargetKey = null;
+    let recRoomData = null;       // /rooms/{roomId} 전체 응답 캐시 (추천 프로필용)
+    let activeRecProfileId = null;
 
     const POS_KEY = "zeta-persona-editor-pos";
     const AUTOSAVE_KEY = "zeta-persona-editor-autosave";
@@ -183,7 +187,7 @@
   select {
     width: 100%; background: #17181a; color: #fff;
     border: 1px solid #555; border-radius: 8px; padding: 7px 8px;
-    font-size: 12px; margin-top: 6px;
+    font-size: 11px; margin-top: 6px;
   }
 
   textarea {
@@ -195,7 +199,7 @@
   .row { display: flex; gap: 6px; margin-top: 8px; align-items: center; }
   button {
     background: #3a3b3e; color: #fff; border: none; border-radius: 8px;
-    padding: 7px 6px; font-size: 11px; cursor: pointer; flex: 1;
+    padding: 7px 4px; font-size: 10.5px; cursor: pointer; flex: 1;
   }
   button.primary { background: #6b6f76; }
   button.mode-btn.active { background: #8a8f98; font-weight: bold; }
@@ -207,6 +211,7 @@
   .status.bad { border-color: #6b4a2f; color: #ffb347; }
 
   .count-row { display:flex; justify-content:space-between; align-items:center; font-size: 10px; color:#999; margin-top:4px; }
+  .count-row #count.over { color: #ff6b6b; font-weight: bold; }
 
   .error-detail {
     display: none;
@@ -236,13 +241,14 @@
   <div class="row" style="margin-top:0;">
     <button class="mode-btn active" id="mode-persona">{{user}}</button>
     <button class="mode-btn" id="mode-plot">{{char}}</button>
+    <button class="mode-btn" id="mode-rec">추천</button>
   </div>
 
   <div class="status" id="status" style="margin-top:8px;">감지 중...</div>
 
   <select id="target-select"><option>불러오는 중...</option></select>
 
-  <textarea id="desc" placeholder="페르소나 description이 여기 자동으로 채워집니다."></textarea>
+  <textarea id="desc" placeholder="내용이 여기 자동으로 채워집니다."></textarea>
 
   <div class="count-row">
     <span id="count">0자</span>
@@ -285,6 +291,7 @@
     const manualSaveBtn = el("manual-save");
     const modePersonaBtn = el("mode-persona");
     const modePlotBtn = el("mode-plot");
+    const modeRecBtn = el("mode-rec");
 
     const BTN_SIZE = 32;
     const BTN_MARGIN = 4;
@@ -298,8 +305,23 @@
 
     applyPos(getPos());
 
+    // 현재 편집 중인 필드의 글자수 제한 (없으면 null)
+    function currentFieldLimit() {
+        if (mode === "rec") return 500;
+        if (mode === "plot" && activePlotTargetKey && activePlotTargetKey.indexOf("chatprofile:") === 0) return 500;
+        return null;
+    }
+
     function updateCount() {
-        countEl.textContent = `${descEl.value.length.toLocaleString()}자`;
+        const limit = currentFieldLimit();
+        const len = descEl.value.length;
+        if (limit) {
+            countEl.textContent = `${len.toLocaleString()}/${limit}자`;
+            countEl.classList.toggle("over", len > limit);
+        } else {
+            countEl.textContent = `${len.toLocaleString()}자`;
+            countEl.classList.remove("over");
+        }
     }
 
     function setSaveState(state, label) {
@@ -322,11 +344,20 @@
         return obj && obj.draft ? obj.draft : null;
     }
 
+    function getRecTargets(roomData) {
+        const list = (roomData && roomData.plot && roomData.plot.chatProfiles) || [];
+        return list.map(cp => ({
+            key: cp.id,
+            label: `🌟 추천 프로필(유저창): ${cp.name || "이름없음"}`,
+            get: () => cp.description || ""
+        }));
+    }
+
     function updateStatus() {
         if (!capturedAuth) {
             statusEl.className = "status bad";
             statusEl.textContent = "⚠ 인증 토큰 아직 못 잡음 (사이트 조작 한번 해보세요)";
-        } else if (!lastPlotId) {
+        } else if (!lastPlotId && mode !== "rec") {
             statusEl.className = "status bad";
             statusEl.textContent = "⚠ 이 방의 plotId 못 잡음 (새로고침 해보세요)";
         } else if (mode === "persona") {
@@ -336,6 +367,20 @@
             } else {
                 statusEl.className = "status ok";
                 statusEl.textContent = `✅ 페르소나 ${personaList.length}개 로드됨`;
+            }
+        } else if (mode === "rec") {
+            if (!recRoomData) {
+                statusEl.className = "status bad";
+                statusEl.textContent = "⚠ 추천 프로필 아직 못 불러옴 → '새로고침' 눌러주세요";
+            } else {
+                const targets = getRecTargets(recRoomData);
+                if (!targets.length) {
+                    statusEl.className = "status bad";
+                    statusEl.textContent = "⚠ 이 방엔 추천 프로필이 없음";
+                } else {
+                    statusEl.className = "status ok";
+                    statusEl.textContent = `✅ 추천 프로필(유저창) 로드됨 · 500자 제한`;
+                }
             }
         } else {
             const draft = getDraft(plotData);
@@ -348,11 +393,15 @@
                     return sum + len;
                 }, 0);
                 statusEl.className = "status ok";
-                statusEl.textContent = `✅ ${draft.name || "(이름없음)"} 상세 로드됨 · 합계 ${total}자 (기본+나레+캐릭)`;
+                statusEl.textContent = `✅ ${draft.name || "(이름없음)"} 상세 로드됨 · 합계 ${total}자 (기본+나레+캐릭+추천)`;
             }
         }
         btnEl.classList.toggle("no-auth", !capturedAuth);
-        btnEl.classList.toggle("ready", !!(capturedAuth && (mode === "persona" ? personaList.length : getDraft(plotData))));
+        btnEl.classList.toggle("ready", !!(capturedAuth && (
+            mode === "persona" ? personaList.length :
+            mode === "rec" ? getRecTargets(recRoomData).length :
+            getDraft(plotData)
+        )));
     }
 
     function rebuildPersonaDropdown() {
@@ -380,6 +429,68 @@
     }
 
     //------------------------------------------
+    // 추천 프로필(유저창) 모드 — /rooms/{roomId} 기준으로 동작
+    //------------------------------------------
+
+    async function fetchRoomFresh() {
+        if (!capturedAuth) return null;
+        try {
+            const res = await originalFetch(ROOM_URL(roomId), {
+                headers: { "Authorization": capturedAuth }
+            });
+            if (!res.ok) return null;
+            return await res.json();
+        } catch {
+            return null;
+        }
+    }
+
+    function rebuildRecDropdown() {
+        const targets = getRecTargets(recRoomData);
+        selectEl.innerHTML = "";
+        targets.forEach(t => {
+            const opt = document.createElement("option");
+            opt.value = t.key;
+            opt.textContent = `${t.label} (${t.get().length}/500자)`;
+            if (t.key === activeRecProfileId) opt.selected = true;
+            selectEl.appendChild(opt);
+        });
+        updateStatus();
+    }
+
+    function loadRecIntoEditor(key) {
+        const targets = getRecTargets(recRoomData);
+        const t = targets.find(x => x.key === key);
+        if (!t) return;
+        activeRecProfileId = key;
+        descEl.value = t.get();
+        updateCount();
+        setSaveState("idle", "대기중"); clearErrorDetail();
+        rebuildRecDropdown();
+    }
+
+    async function refreshRecData(preserveTarget) {
+        const fresh = await fetchRoomFresh();
+        if (!fresh || !fresh.plot) {
+            setSaveState("error", "불러오기 실패 ❌");
+            return false;
+        }
+        recRoomData = fresh;
+        const targets = getRecTargets(fresh);
+        if (preserveTarget && targets.find(t => t.key === activeRecProfileId)) {
+            loadRecIntoEditor(activeRecProfileId);
+        } else if (targets.length) {
+            loadRecIntoEditor(targets[0].key);
+        } else {
+            selectEl.innerHTML = "<option>추천 프로필 없음</option>";
+            descEl.value = "";
+            updateCount();
+        }
+        updateStatus();
+        return true;
+    }
+
+    //------------------------------------------
     // {{char}} 상세(plot) 모드 — draft 객체 기준으로 동작
     //------------------------------------------
 
@@ -397,6 +508,14 @@
                 set: (o, v) => { const t = o.characters.find(x => x.id === c.id); if (t) t.description = v; }
             });
         });
+        (draft.chatProfiles || []).forEach(cp => {
+            targets.push({
+                key: "chatprofile:" + cp.id,
+                label: `🌟 추천 프로필(캐릭창): ${cp.name || "(이름없음)"}`,
+                get: o => ((o.chatProfiles || []).find(x => x.id === cp.id) || {}).description || "",
+                set: (o, v) => { const t = (o.chatProfiles || []).find(x => x.id === cp.id); if (t) t.description = v; }
+            });
+        });
         return targets;
     }
 
@@ -406,7 +525,8 @@
         getPlotTargets(draft).forEach(t => {
             const opt = document.createElement("option");
             opt.value = t.key;
-            opt.textContent = `${t.label} (${t.get(draft).length}자)`;
+            const limit = t.key.indexOf("chatprofile:") === 0 ? "/500" : "";
+            opt.textContent = `${t.label} (${t.get(draft).length}${limit}자)`;
             if (t.key === activePlotTargetKey) opt.selected = true;
             selectEl.appendChild(opt);
         });
@@ -548,6 +668,7 @@
 
     async function doAutoSave() {
         if (mode === "persona") return doAutoSavePersona();
+        if (mode === "rec") return doAutoSaveRec();
         return doAutoSavePlot();
     }
 
@@ -600,11 +721,67 @@
         }
     }
 
+    // 추천 프로필(유저창) 저장 — PATCH /v1/rooms/{roomId}/user-plot-chat-profiles/me
+    async function doAutoSaveRec() {
+        if (!activeRecProfileId) return;
+        if (!capturedAuth) {
+            setSaveState("error", "인증 없음 ❌");
+            return;
+        }
+        if (saveInFlight) {
+            saveQueued = true;
+            return;
+        }
+        saveInFlight = true;
+        setSaveState("saving", "저장 중...");
+        clearErrorDetail();
+
+        const newDesc = descEl.value;
+
+        try {
+            const res = await originalFetch(REC_PATCH_URL(roomId), {
+                method: "PATCH",
+                headers: {
+                    "Content-Type": "application/json",
+                    "Authorization": capturedAuth
+                },
+                body: JSON.stringify({ description: newDesc })
+            });
+
+            if (res.ok) {
+                if (recRoomData && recRoomData.plot && Array.isArray(recRoomData.plot.chatProfiles)) {
+                    const cp = recRoomData.plot.chatProfiles.find(c => c.id === activeRecProfileId);
+                    if (cp) cp.description = newDesc;
+                }
+                setSaveState("saved", "저장됨 ✅");
+                rebuildRecDropdown();
+            } else {
+                const t = await res.text().catch(() => "");
+                let friendly = `실패 ❌ (HTTP ${res.status})`;
+                if (t.includes("CONSTRAINT")) friendly = "실패 ❌ 글자수 제한 초과 (500자)";
+                setSaveState("error", friendly);
+                showErrorDetail(t || "(응답 본문 없음)");
+                console.error("🩶 PersonaEditor(rec) 저장 실패:", res.status, t);
+            }
+        } catch (err) {
+            setSaveState("error", "네트워크 오류 ❌");
+            showErrorDetail(String(err && err.message));
+            console.error("🩶 PersonaEditor(rec) 네트워크 오류:", err);
+        } finally {
+            saveInFlight = false;
+            if (saveQueued) {
+                saveQueued = false;
+                doAutoSave();
+            }
+        }
+    }
+
     // ★★★ 핵심 수정 (v1.4.5):
     // /creator 응답의 draft 객체가 편집 폼 데이터와 거의 동일한 구조라는 것을 확인.
     // draft를 기반으로 PUT 바디를 구성하되, draft 밖에 있는 몇몇 메타 필드
     // (plotId, unlimitedMonitoring*)를 최상위 fresh 객체에서 보충한다.
     // exampleConversation(단수, draft) → exampleConversations(복수, PUT 요구 필드명)로 매핑.
+    // chatProfiles(추천 프로필 캐릭창 쪽)도 draft에 포함되어 있어 그대로 전달.
     function buildPlotPutBody(fresh) {
         const draft = fresh.draft || {};
         return {
@@ -738,13 +915,15 @@
 
     selectEl.addEventListener("change", () => {
         const hasUnsaved = saveStateEl.textContent.includes("저장 필요") || saveStateEl.textContent.includes("입력 중");
-        if (mode === "plot" && hasUnsaved && !confirm("저장 안 된 수정사항이 있어요. 그냥 다른 항목으로 바꿀까요? (지금 내용은 사라져요)")) {
-            selectEl.value = activePlotTargetKey;
+        if ((mode === "plot" || mode === "rec") && hasUnsaved && !confirm("저장 안 된 수정사항이 있어요. 그냥 다른 항목으로 바꿀까요? (지금 내용은 사라져요)")) {
+            selectEl.value = mode === "rec" ? activeRecProfileId : activePlotTargetKey;
             return;
         }
         if (mode === "persona") {
             userPickedManually = true;
             loadPersonaIntoEditor(selectEl.value);
+        } else if (mode === "rec") {
+            loadRecIntoEditor(selectEl.value);
         } else {
             loadPlotTargetIntoEditor(selectEl.value);
         }
@@ -755,6 +934,7 @@
         mode = newMode;
         modePersonaBtn.classList.toggle("active", mode === "persona");
         modePlotBtn.classList.toggle("active", mode === "plot");
+        modeRecBtn.classList.toggle("active", mode === "rec");
         clearTimeout(saveDebounce);
 
         if (mode === "persona") {
@@ -765,6 +945,16 @@
                 selectEl.innerHTML = "<option>새로고침 눌러주세요</option>";
                 descEl.value = "";
                 updateCount();
+            }
+        } else if (mode === "rec") {
+            if (recRoomData) {
+                rebuildRecDropdown();
+                if (activeRecProfileId) loadRecIntoEditor(activeRecProfileId);
+            } else {
+                selectEl.innerHTML = "<option>불러오는 중...</option>";
+                descEl.value = "";
+                updateCount();
+                await refreshRecData(false);
             }
         } else {
             if (getDraft(plotData)) {
@@ -782,6 +972,7 @@
 
     modePersonaBtn.addEventListener("click", () => switchMode("persona"));
     modePlotBtn.addEventListener("click", () => switchMode("plot"));
+    modeRecBtn.addEventListener("click", () => switchMode("rec"));
 
     el("refresh").addEventListener("click", async () => {
         if (mode === "persona") {
@@ -807,6 +998,8 @@
                 console.error("🩶 PersonaEditor 새로고침 실패:", err);
             }
             updateStatus();
+        } else if (mode === "rec") {
+            await refreshRecData(true);
         } else {
             await refreshPlotData(true);
         }
@@ -828,11 +1021,14 @@
             userPickedManually = false;
             plotData = null;
             activePlotTargetKey = null;
+            recRoomData = null;
+            activeRecProfileId = null;
             selectEl.innerHTML = "<option>불러오는 중...</option>";
             descEl.value = "";
             updateCount();
             refreshRoomUI();
             if (mode === "plot") refreshPlotData(false);
+            if (mode === "rec") refreshRecData(false);
         }
     }, 1000);
 
@@ -916,6 +1112,8 @@
         get activePersonaId() { return activePersonaId; },
         get plotData() { return plotData; },
         get activePlotTargetKey() { return activePlotTargetKey; },
+        get recRoomData() { return recRoomData; },
+        get activeRecProfileId() { return activeRecProfileId; },
         get hasAuth() { return !!capturedAuth; }
     };
 
