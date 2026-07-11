@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Zeta Persona Quick Editor
 // @namespace    zeta-persona-editor
-// @version      1.7.0
+// @version      1.7.1
 // @description  현재 방의 유저 페르소나(+추천 프로필) / {{char}} 상세를 자동으로 불러와서, 페이지 이동 없이 바로 수정/자동저장하는 미니 에디터
 // @match        https://zeta-ai.io/*
 // @match        https://*.zeta-ai.io/*
@@ -19,7 +19,7 @@
     }
     window.__ZETA_PERSONA_EDITOR_RUNNING__ = true;
 
-    const VERSION = "1.7.0";
+    const VERSION = "1.7.1";
 
     const PROFILES_LIST_RE = /\/v1\/user-chat-profiles(?:\?|$)/;
     const PLOT_ROOM_RE = /\/plots\/([^/]+)\/rooms\/([^/]+)\//;
@@ -385,12 +385,14 @@
                 statusEl.className = "status bad";
                 statusEl.textContent = "⚠ {{char}} 상세 아직 못 불러옴 → '새로고침' 눌러주세요";
             } else {
-                const total = getPlotTargets(draft).reduce((sum, t) => {
-                    const len = t.key === activePlotTargetKey ? descEl.value.length : t.get(draft).length;
-                    return sum + len;
-                }, 0);
+                const total = getPlotTargets(draft)
+                    .filter(t => t.key.indexOf("chatprofile:") !== 0) // 추천 프로필은 합계에서 제외
+                    .reduce((sum, t) => {
+                        const len = t.key === activePlotTargetKey ? descEl.value.length : t.get(draft).length;
+                        return sum + len;
+                    }, 0);
                 statusEl.className = "status ok";
-                statusEl.textContent = `✅ ${draft.name || "(이름없음)"} 상세 로드됨 · 합계 ${total}자 (기본+나레+캐릭+추천)`;
+                statusEl.textContent = `✅ ${draft.name || "(이름없음)"} 상세 로드됨 · 합계 ${total}자 (기본+내레+캐릭)`;
             }
         }
         btnEl.classList.toggle("no-auth", !capturedAuth);
@@ -492,7 +494,7 @@
         if (!draft) return [];
         const targets = [
             { key: "longDescription", label: "📘 기본설정 (longDescription)", get: o => o.longDescription || "", set: (o, v) => { o.longDescription = v; } },
-            { key: "narrator", label: "🗣 나레이터 설정 (narrator)", get: o => o.narrator || "", set: (o, v) => { o.narrator = v; } }
+            { key: "narrator", label: "🗣 내레이터 설정 (narrator)", get: o => o.narrator || "", set: (o, v) => { o.narrator = v; } }
         ];
         (draft.characters || []).forEach(c => {
             targets.push({
@@ -519,8 +521,7 @@
         getPlotTargets(draft).forEach(t => {
             const opt = document.createElement("option");
             opt.value = t.key;
-            const limitTxt = t.key.indexOf("chatprofile:") === 0 ? "/500" : "";
-            opt.textContent = `${t.label} (${t.get(draft).length}${limitTxt}자)`;
+            opt.textContent = `${t.label} (${t.get(draft).length}자)`;
             if (t.key === activePlotTargetKey) opt.selected = true;
             selectEl.appendChild(opt);
         });
