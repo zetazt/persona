@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Zeta Persona Quick Editor
 // @namespace    zeta-persona-editor
-// @version      1.4.4
+// @version      1.4.5
 // @description  현재 방의 유저 페르소나를 자동으로 불러와서, 페이지 이동 없이 바로 수정/자동저장하는 미니 에디터
 // @match        https://zeta-ai.io/*
 // @match        https://*.zeta-ai.io/*
@@ -19,16 +19,17 @@
     }
     window.__ZETA_PERSONA_EDITOR_RUNNING__ = true;
 
-    const VERSION = "1.4.4";
+    const VERSION = "1.4.5";
 
     const PROFILES_LIST_RE = /\/v1\/user-chat-profiles(?:\?|$)/;
     const PLOT_ROOM_RE = /\/plots\/([^/]+)\/rooms\/([^/]+)\//;
     const PLOTID_QUERY_RE = /[?&]plotId=([^&]+)/;
     const PROFILE_PATCH_URL = (id) => `https://api.zeta-ai.io/v1/user-chat-profiles/${id}`;
     const PLOT_URL = (id) => `https://api.zeta-ai.io/v1/plots/${id}`;
+    const PLOT_CREATOR_URL = (id) => `https://api.zeta-ai.io/v1/plots/${id}/creator`;
 
     let mode = "persona"; // "persona" | "plot"
-    let plotData = null;
+    let plotData = null;          // /creator 전체 응답 (draft 포함) 캐시
     let activePlotTargetKey = null;
 
     const POS_KEY = "zeta-persona-editor-pos";
@@ -316,6 +317,11 @@
         errorDetailEl.classList.remove("show");
     }
 
+    // plotData는 /creator 응답 전체. 실제 편집 대상은 plotData.draft 안에 있음.
+    function getDraft(obj) {
+        return obj && obj.draft ? obj.draft : null;
+    }
+
     function updateStatus() {
         if (!capturedAuth) {
             statusEl.className = "status bad";
@@ -332,20 +338,21 @@
                 statusEl.textContent = `✅ 페르소나 ${personaList.length}개 로드됨`;
             }
         } else {
-            if (!plotData) {
+            const draft = getDraft(plotData);
+            if (!draft) {
                 statusEl.className = "status bad";
                 statusEl.textContent = "⚠ {{char}} 상세 아직 못 불러옴 → '새로고침' 눌러주세요";
             } else {
-                const total = getPlotTargets(plotData).reduce((sum, t) => {
-                    const len = t.key === activePlotTargetKey ? descEl.value.length : t.get(plotData).length;
+                const total = getPlotTargets(draft).reduce((sum, t) => {
+                    const len = t.key === activePlotTargetKey ? descEl.value.length : t.get(draft).length;
                     return sum + len;
                 }, 0);
                 statusEl.className = "status ok";
-                statusEl.textContent = `✅ ${plotData.name || "(이름없음)"} 상세 로드됨 · 합계 ${total}자 (기본+나레+캐릭)`;
+                statusEl.textContent = `✅ ${draft.name || "(이름없음)"} 상세 로드됨 · 합계 ${total}자 (기본+나레+캐릭)`;
             }
         }
         btnEl.classList.toggle("no-auth", !capturedAuth);
-        btnEl.classList.toggle("ready", !!(capturedAuth && (mode === "persona" ? personaList.length : plotData)));
+        btnEl.classList.toggle("ready", !!(capturedAuth && (mode === "persona" ? personaList.length : getDraft(plotData))));
     }
 
     function rebuildPersonaDropdown() {
@@ -372,15 +379,17 @@
         rebuildPersonaDropdown();
     }
 
-    // {{char}} 상세(plot) 모드용 - 서버 응답 스키마가 바뀌어도 자동 대응하도록
-    // characters 배열만 별도 처리하고, 나머지 최상위 필드는 longDescription/narrator만 취급.
-    function getPlotTargets(obj) {
-        if (!obj) return [];
+    //------------------------------------------
+    // {{char}} 상세(plot) 모드 — draft 객체 기준으로 동작
+    //------------------------------------------
+
+    function getPlotTargets(draft) {
+        if (!draft) return [];
         const targets = [
             { key: "longDescription", label: "📘 기본설정 (longDescription)", get: o => o.longDescription || "", set: (o, v) => { o.longDescription = v; } },
             { key: "narrator", label: "🗣 나레이터 설정 (narrator)", get: o => o.narrator || "", set: (o, v) => { o.narrator = v; } }
         ];
-        (obj.characters || []).forEach(c => {
+        (draft.characters || []).forEach(c => {
             targets.push({
                 key: "char:" + c.id,
                 label: `👤 {{char}}: ${c.name || "(이름없음)"}`,
@@ -392,11 +401,12 @@
     }
 
     function rebuildPlotDropdown() {
+        const draft = getDraft(plotData);
         selectEl.innerHTML = "";
-        getPlotTargets(plotData).forEach(t => {
+        getPlotTargets(draft).forEach(t => {
             const opt = document.createElement("option");
             opt.value = t.key;
-            opt.textContent = `${t.label} (${t.get(plotData).length}자)`;
+            opt.textContent = `${t.label} (${t.get(draft).length}자)`;
             if (t.key === activePlotTargetKey) opt.selected = true;
             selectEl.appendChild(opt);
         });
@@ -404,10 +414,11 @@
     }
 
     function loadPlotTargetIntoEditor(key) {
-        const target = getPlotTargets(plotData).find(t => t.key === key);
+        const draft = getDraft(plotData);
+        const target = getPlotTargets(draft).find(t => t.key === key);
         if (!target) return;
         activePlotTargetKey = key;
-        descEl.value = target.get(plotData);
+        descEl.value = target.get(draft);
         updateCount();
         setSaveState("idle", "대기중"); clearErrorDetail();
         rebuildPlotDropdown();
@@ -416,7 +427,7 @@
     async function fetchPlotFresh() {
         if (!capturedAuth || !lastPlotId) return null;
         try {
-            const res = await originalFetch(PLOT_URL(lastPlotId), {
+            const res = await originalFetch(PLOT_CREATOR_URL(lastPlotId), {
                 headers: { "Authorization": capturedAuth }
             });
             if (!res.ok) return null;
@@ -428,12 +439,12 @@
 
     async function refreshPlotData(preserveTarget) {
         const fresh = await fetchPlotFresh();
-        if (!fresh) {
+        if (!fresh || !fresh.draft) {
             setSaveState("error", "불러오기 실패 ❌");
             return false;
         }
         plotData = fresh;
-        const targets = getPlotTargets(plotData);
+        const targets = getPlotTargets(fresh.draft);
         if (preserveTarget && targets.find(t => t.key === activePlotTargetKey)) {
             loadPlotTargetIntoEditor(activePlotTargetKey);
         } else if (targets.length) {
@@ -589,11 +600,37 @@
         }
     }
 
-    // ★★★ 핵심 수정: 화이트리스트로 필드를 고르지 않고,
-    // 서버에서 방금 받아온 fresh 객체를 그대로 통째로 복사해서 보낸다.
-    // (서버 스키마가 바뀌어도 항상 "받은 그대로 + 수정한 필드만" 유지되어 안전함)
+    // ★★★ 핵심 수정 (v1.4.5):
+    // /creator 응답의 draft 객체가 편집 폼 데이터와 거의 동일한 구조라는 것을 확인.
+    // draft를 기반으로 PUT 바디를 구성하되, draft 밖에 있는 몇몇 메타 필드
+    // (plotId, unlimitedMonitoring*)를 최상위 fresh 객체에서 보충한다.
+    // exampleConversation(단수, draft) → exampleConversations(복수, PUT 요구 필드명)로 매핑.
     function buildPlotPutBody(fresh) {
-        return { ...fresh };
+        const draft = fresh.draft || {};
+        return {
+            plotId: fresh.id,
+            chatProfiles: draft.chatProfiles || fresh.chatProfiles || [],
+            shortDescription: draft.shortDescription || "",
+            hashtags: draft.hashtags || [],
+            isAboutPublic: draft.isAboutPublic || false,
+            about: draft.about || null,
+            isCreatorCommentPublic: draft.isCreatorCommentPublic || false,
+            creatorComment: draft.creatorComment || "",
+            isExampleConversationPublic: draft.isExampleConversationPublic || false,
+            unlimitedMonitoringStatus: fresh.unlimitedMonitoringStatus,
+            unlimitedReExaminationCount: fresh.unlimitedReExaminationCount,
+            unlimitedMonitoringCompletedAt: fresh.unlimitedMonitoringCompletedAt,
+            lorebookIds: draft.lorebookIds || [],
+            stylePreset: draft.stylePreset || null,
+            infoBoxSetting: draft.infoBoxSetting || null,
+            cyoaSetting: draft.cyoaSetting || null,
+            name: draft.name,
+            longDescription: draft.longDescription || "",
+            narrator: draft.narrator || "",
+            characters: draft.characters || [],
+            intros: draft.intros || [],
+            exampleConversations: draft.exampleConversation || draft.exampleConversations || []
+        };
     }
 
     function sanitizeSurrogates(str) {
@@ -619,18 +656,19 @@
 
         try {
             const fresh = await fetchPlotFresh();
-            if (!fresh) {
+            if (!fresh || !fresh.draft) {
                 setSaveState("error", "최신본 못 가져옴 ❌");
                 return;
             }
 
-            const targets = getPlotTargets(fresh);
+            const draft = fresh.draft;
+            const targets = getPlotTargets(draft);
             const target = targets.find(t => t.key === targetKey);
             if (!target) {
                 setSaveState("error", "대상 필드를 못 찾음 ❌");
                 return;
             }
-            target.set(fresh, newText);
+            target.set(draft, newText);
 
             const bodyStr = sanitizeSurrogates(JSON.stringify(buildPlotPutBody(fresh)));
 
@@ -729,7 +767,7 @@
                 updateCount();
             }
         } else {
-            if (plotData) {
+            if (getDraft(plotData)) {
                 rebuildPlotDropdown();
                 if (activePlotTargetKey) loadPlotTargetIntoEditor(activePlotTargetKey);
             } else {
