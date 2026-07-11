@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Zeta Persona Quick Editor
 // @namespace    zeta-persona-editor
-// @version      1.7.1
+// @version      1.8.0
 // @description  현재 방의 유저 페르소나(+추천 프로필) / {{char}} 상세를 자동으로 불러와서, 페이지 이동 없이 바로 수정/자동저장하는 미니 에디터
 // @match        https://zeta-ai.io/*
 // @match        https://*.zeta-ai.io/*
@@ -19,7 +19,7 @@
     }
     window.__ZETA_PERSONA_EDITOR_RUNNING__ = true;
 
-    const VERSION = "1.7.1";
+    const VERSION = "1.8.0";
 
     const PROFILES_LIST_RE = /\/v1\/user-chat-profiles(?:\?|$)/;
     const PLOT_ROOM_RE = /\/plots\/([^/]+)\/rooms\/([^/]+)\//;
@@ -82,6 +82,19 @@
         localStorage.setItem(plotIdKey(id), plotId);
     }
 
+    // 방(roomId)별로 마지막에 선택했던 {{user}} 탭 항목(내 페르소나 id 또는 "rec:"+추천프로필id)을 기억해둔다.
+    function personaSelectionKey(id) {
+        return `zeta-persona-editor-lastpersona-${id}`;
+    }
+
+    function getSavedPersonaSelection(id) {
+        return localStorage.getItem(personaSelectionKey(id));
+    }
+
+    function saveSavedPersonaSelection(id, key) {
+        if (key) localStorage.setItem(personaSelectionKey(id), key);
+    }
+
     let capturedAuth = null;
     let lastPlotId = getCachedPlotId(roomId);
     let personaList = [];
@@ -129,7 +142,7 @@
             if (!Array.isArray(list)) return;
 
             personaList = list;
-            if (!userPickedManually && !activePersonaId) {
+            if (!tryApplySavedPersonaSelection() && !userPickedManually && !activePersonaId) {
                 const sel = list.find(p => p && p.selected);
                 if (sel && sel.id) loadPersonaIntoEditor(sel.id);
             }
@@ -310,7 +323,6 @@
     // 현재 편집 중인 필드의 글자수 제한 (없으면 null)
     function currentFieldLimit() {
         if (mode === "persona" && isRecKey(activePersonaId)) return 500;
-        if (mode === "plot" && activePlotTargetKey && activePlotTargetKey.indexOf("chatprofile:") === 0) return 500;
         return null;
     }
 
@@ -385,12 +397,10 @@
                 statusEl.className = "status bad";
                 statusEl.textContent = "⚠ {{char}} 상세 아직 못 불러옴 → '새로고침' 눌러주세요";
             } else {
-                const total = getPlotTargets(draft)
-                    .filter(t => t.key.indexOf("chatprofile:") !== 0) // 추천 프로필은 합계에서 제외
-                    .reduce((sum, t) => {
-                        const len = t.key === activePlotTargetKey ? descEl.value.length : t.get(draft).length;
-                        return sum + len;
-                    }, 0);
+                const total = getPlotTargets(draft).reduce((sum, t) => {
+                    const len = t.key === activePlotTargetKey ? descEl.value.length : t.get(draft).length;
+                    return sum + len;
+                }, 0);
                 statusEl.className = "status ok";
                 statusEl.textContent = `✅ ${draft.name || "(이름없음)"} 상세 로드됨 · 합계 ${total}자 (기본+내레+캐릭)`;
             }
@@ -431,6 +441,7 @@
             const t = getRecTargets(recRoomData).find(x => x.key === recId);
             if (!t) return;
             activePersonaId = key;
+            saveSavedPersonaSelection(roomId, key);
             descEl.value = t.get();
             updateCount();
             setSaveState("idle", "대기중"); clearErrorDetail();
@@ -440,10 +451,31 @@
         const p = personaList.find(x => x.id === key);
         if (!p) return;
         activePersonaId = key;
+        saveSavedPersonaSelection(roomId, key);
         descEl.value = p.description || "";
         updateCount();
         setSaveState("idle", "대기중"); clearErrorDetail();
         rebuildPersonaDropdown();
+    }
+
+    // 저장된(이전에 선택했던) 항목이 지금 로드된 데이터 안에 있으면 그걸로 자동 선택한다.
+    // 사용자가 이번 세션에서 이미 직접 다른 항목을 골랐다면(userPickedManually) 덮어쓰지 않는다.
+    function tryApplySavedPersonaSelection() {
+        if (userPickedManually) return false;
+        const saved = getSavedPersonaSelection(roomId);
+        if (!saved) return false;
+        if (activePersonaId === saved) return true;
+        if (isRecKey(saved)) {
+            const recId = recIdFromKey(saved);
+            if (getRecTargets(recRoomData).some(t => t.key === recId)) {
+                loadPersonaIntoEditor(saved);
+                return true;
+            }
+        } else if (personaList.some(p => p.id === saved)) {
+            loadPersonaIntoEditor(saved);
+            return true;
+        }
+        return false;
     }
 
     //------------------------------------------
@@ -502,14 +534,6 @@
                 label: `👤 {{char}}: ${c.name || "(이름없음)"}`,
                 get: o => (o.characters.find(x => x.id === c.id) || {}).description || "",
                 set: (o, v) => { const t = o.characters.find(x => x.id === c.id); if (t) t.description = v; }
-            });
-        });
-        (draft.chatProfiles || []).forEach(cp => {
-            targets.push({
-                key: "chatprofile:" + cp.id,
-                label: `🌟 추천 프로필(캐릭창): ${cp.name || "(이름없음)"}`,
-                get: o => ((o.chatProfiles || []).find(x => x.id === cp.id) || {}).description || "",
-                set: (o, v) => { const t = (o.chatProfiles || []).find(x => x.id === cp.id); if (t) t.description = v; }
             });
         });
         return targets;
@@ -651,7 +675,7 @@
                 const ok = await refreshRecData();
                 if (ok) {
                     rebuildPersonaDropdown();
-                    if (!activePersonaId) {
+                    if (!tryApplySavedPersonaSelection() && !activePersonaId) {
                         const recTargets = getRecTargets(recRoomData);
                         if (recTargets.length) {
                             loadPersonaIntoEditor(REC_KEY_PREFIX + recTargets[0].key);
@@ -959,15 +983,17 @@
             }
             if (personaList.length || getRecTargets(recRoomData).length) {
                 rebuildPersonaDropdown();
-                if (activePersonaId) {
-                    loadPersonaIntoEditor(activePersonaId);
-                } else {
-                    const recTargets = getRecTargets(recRoomData);
-                    if (recTargets.length) {
-                        loadPersonaIntoEditor(REC_KEY_PREFIX + recTargets[0].key);
+                if (!tryApplySavedPersonaSelection()) {
+                    if (activePersonaId) {
+                        loadPersonaIntoEditor(activePersonaId);
                     } else {
-                        const sel = personaList.find(p => p.selected) || personaList[0];
-                        if (sel) loadPersonaIntoEditor(sel.id);
+                        const recTargets = getRecTargets(recRoomData);
+                        if (recTargets.length) {
+                            loadPersonaIntoEditor(REC_KEY_PREFIX + recTargets[0].key);
+                        } else {
+                            const sel = personaList.find(p => p.selected) || personaList[0];
+                            if (sel) loadPersonaIntoEditor(sel.id);
+                        }
                     }
                 }
             } else {
@@ -1011,7 +1037,7 @@
                 console.error("🩶 PersonaEditor 새로고침 실패:", err);
             }
             await refreshRecData();
-            if (!activePersonaId) {
+            if (!tryApplySavedPersonaSelection() && !activePersonaId) {
                 const recTargets = getRecTargets(recRoomData);
                 if (recTargets.length) {
                     loadPersonaIntoEditor(REC_KEY_PREFIX + recTargets[0].key);
@@ -1051,7 +1077,12 @@
             refreshRoomUI();
             if (mode === "plot") refreshPlotData(false);
             if (mode === "persona") {
-                refreshRecData().then(() => { rebuildPersonaDropdown(); updateStatus(); });
+                refreshRecData().then(() => {
+                    rebuildPersonaDropdown();
+                    tryApplySavedPersonaSelection();
+                    rebuildPersonaDropdown();
+                    updateStatus();
+                });
             }
         }
     }, 1000);
