@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Zeta Persona Quick Editor
 // @namespace    zeta-persona-editor
-// @version      1.1.0
+// @version      1.2.0
 // @description  현재 방의 유저 페르소나를 자동으로 불러와서, 페이지 이동 없이 바로 수정/자동저장하는 미니 에디터
 // @match        https://zeta-ai.io/*
 // @match        https://*.zeta-ai.io/*
@@ -14,17 +14,22 @@
     "use strict";
 
     // ==========================
-    // Zeta Persona Quick Editor v1.1.0
+    // Zeta Persona Quick Editor v1.2.0
     //
     // 원리:
-    // - 유저노트/마커/base+note 조합 없음. 그냥 페르소나 description을
-    //   있는 그대로 불러와서(1:1), 수정하면 있는 그대로(1:1) 덮어쓴다.
-    //   => 절대 중복/누적 안 됨.
-    // - 현재 방(room)의 plotId를 실시간 요청 훔쳐보기로 감지해서,
-    //   그 방에 선택된(selected) 페르소나를 자동으로 불러온다.
-    // - 방을 옮기면 자동으로 그 방의 페르소나로 전환된다.
-    // - 드롭다운으로 다른 페르소나를 수동으로 골라서 편집할 수도 있다.
-    // - 입력을 멈추면(디바운스) 자동저장. 저장 버튼 없음.
+    // - 유저노트/마커/base+note 조합 없음. 그냥 필드 값을 있는 그대로
+    //   불러와서(1:1), 수정하면 있는 그대로(1:1) 덮어쓴다. 절대 중복/누적 안 됨.
+    // - 모드 두 가지:
+    //   1) 유저 페르소나 (user-chat-profiles, PATCH — 그 필드만 갱신)
+    //   2) {{char}} 상세 (plots, PUT — 문서 전체를 다시 보내야 해서,
+    //      저장 직전마다 서버 최신본을 다시 받아와서 딱 그 필드만 바꾸고
+    //      나머지는 절대 안 건드림. 기본설정+나레이터+캐릭터별 설명 합쳐서
+    //      1200자 서버 제한 있음, 실측 확인됨(PLOT_CONTENT_CONSTRAINT_VIOLATION))
+    // - 현재 방(room)의 plotId를 실시간 요청 훔쳐보기로 감지.
+    // - 방을 옮기면 자동으로 그 방 것으로 전환된다.
+    // - 드롭다운으로 다른 대상을 수동으로 골라서 편집할 수도 있다.
+    // - 입력을 멈추면(디바운스) 자동저장 — 단, 자동저장 토글 켜져 있을 때만.
+    //   꺼져있으면 수동으로 "저장" 버튼 눌러야 함.
     // - 인증 토큰은 site가 만드는 실제 요청에서 실시간으로 훔쳐봐서 재사용.
     // ==========================
 
@@ -34,12 +39,17 @@
     }
     window.__ZETA_PERSONA_EDITOR_RUNNING__ = true;
 
-    const VERSION = "1.1.0";
+    const VERSION = "1.2.0";
 
     const PROFILES_LIST_RE = /\/v1\/user-chat-profiles(?:\?|$)/;
     const PLOT_ROOM_RE = /\/plots\/([^/]+)\/rooms\/([^/]+)\//;
     const PLOTID_QUERY_RE = /[?&]plotId=([^&]+)/;
     const PROFILE_PATCH_URL = (id) => `https://api.zeta-ai.io/v1/user-chat-profiles/${id}`;
+    const PLOT_URL = (id) => `https://api.zeta-ai.io/v1/plots/${id}`;
+
+    let mode = "persona"; // "persona" | "plot"
+    let plotData = null;          // {{char}}상세 모드: 서버에서 받은 전체 plot 객체 (참고/표시용 캐시)
+    let activePlotTargetKey = null; // "longDescription" | "narrator" | "char:{characterId}"
 
     const POS_KEY = "zeta-persona-editor-pos";
     const AUTOSAVE_KEY = "zeta-persona-editor-autosave";
@@ -223,6 +233,7 @@
     padding: 7px 6px; font-size: 11px; cursor: pointer; flex: 1;
   }
   button.primary { background: #6b6f76; }
+  button.mode-btn.active { background: #8a8f98; font-weight: bold; }
 
   .title { font-weight: bold; font-size: 13px; margin-bottom: 4px; display: flex; justify-content: space-between; align-items: center; }
   .room { color: #999; font-size: 10px; margin-bottom: 8px; word-break: break-all; }
@@ -248,9 +259,14 @@
   </div>
   <div class="room" id="room"></div>
 
+  <div class="row" style="margin-top:0;">
+    <button class="mode-btn active" id="mode-persona">유저 페르소나</button>
+    <button class="mode-btn" id="mode-plot">{{char}} 상세</button>
+  </div>
+
   <div class="status" id="status">감지 중...</div>
 
-  <select id="persona-select"><option>불러오는 중...</option></select>
+  <select id="target-select"><option>불러오는 중...</option></select>
 
   <textarea id="desc" placeholder="페르소나 description이 여기 자동으로 채워집니다."></textarea>
 
@@ -267,7 +283,7 @@
   </div>
 
   <div class="row">
-    <button id="refresh">목록 새로고침</button>
+    <button id="refresh">새로고침</button>
   </div>
 
   <hr>
@@ -284,12 +300,14 @@
     const panelEl = el("panel");
     const roomEl = el("room");
     const statusEl = el("status");
-    const selectEl = el("persona-select");
+    const selectEl = el("target-select");
     const descEl = el("desc");
     const countEl = el("count");
     const saveStateEl = el("save-state");
     const autosaveToggleEl = el("autosave-toggle");
     const manualSaveBtn = el("manual-save");
+    const modePersonaBtn = el("mode-persona");
+    const modePlotBtn = el("mode-plot");
 
     const BTN_SIZE = 32;
     const BTN_MARGIN = 4;
@@ -319,15 +337,25 @@
         } else if (!lastPlotId) {
             statusEl.className = "status bad";
             statusEl.textContent = "⚠ 이 방의 plotId 못 잡음 (새로고침 해보세요)";
-        } else if (personaList.length === 0) {
-            statusEl.className = "status bad";
-            statusEl.textContent = "⚠ 페르소나 목록 아직 못 잡음 → '목록 새로고침' 눌러주세요";
+        } else if (mode === "persona") {
+            if (personaList.length === 0) {
+                statusEl.className = "status bad";
+                statusEl.textContent = "⚠ 페르소나 목록 아직 못 잡음 → '새로고침' 눌러주세요";
+            } else {
+                statusEl.className = "status ok";
+                statusEl.textContent = `✅ 페르소나 ${personaList.length}개 로드됨`;
+            }
         } else {
-            statusEl.className = "status ok";
-            statusEl.textContent = `✅ 페르소나 ${personaList.length}개 로드됨`;
+            if (!plotData) {
+                statusEl.className = "status bad";
+                statusEl.textContent = "⚠ {{char}} 상세 아직 못 불러옴 → '새로고침' 눌러주세요";
+            } else {
+                statusEl.className = "status ok";
+                statusEl.textContent = `✅ ${plotData.name || "(이름없음)"} 상세 로드됨 · 기본설정+나레이터+캐릭터 합쳐 1200자 제한 있음`;
+            }
         }
         btnEl.classList.toggle("no-auth", !capturedAuth);
-        btnEl.classList.toggle("ready", !!(capturedAuth && personaList.length));
+        btnEl.classList.toggle("ready", !!(capturedAuth && (mode === "persona" ? personaList.length : plotData)));
     }
 
     function rebuildPersonaDropdown() {
@@ -352,6 +380,79 @@
         updateCount();
         setSaveState("idle", "대기중");
         rebuildPersonaDropdown();
+    }
+
+    //------------------------------------------
+    // {{char}} 상세(plot) 모드
+    //------------------------------------------
+
+    function getPlotTargets(obj) {
+        if (!obj) return [];
+        const targets = [
+            { key: "longDescription", label: "📘 기본설정 (longDescription)", get: o => o.longDescription || "", set: (o, v) => { o.longDescription = v; } },
+            { key: "narrator", label: "🗣 나레이터 설정 (narrator)", get: o => o.narrator || "", set: (o, v) => { o.narrator = v; } }
+        ];
+        (obj.characters || []).forEach(c => {
+            targets.push({
+                key: "char:" + c.id,
+                label: `👤 {{char}}: ${c.name || "(이름없음)"}`,
+                get: o => (o.characters.find(x => x.id === c.id) || {}).description || "",
+                set: (o, v) => { const t = o.characters.find(x => x.id === c.id); if (t) t.description = v; }
+            });
+        });
+        return targets;
+    }
+
+    function rebuildPlotDropdown() {
+        selectEl.innerHTML = "";
+        getPlotTargets(plotData).forEach(t => {
+            const opt = document.createElement("option");
+            opt.value = t.key;
+            opt.textContent = `${t.label} (${t.get(plotData).length}자)`;
+            if (t.key === activePlotTargetKey) opt.selected = true;
+            selectEl.appendChild(opt);
+        });
+        updateStatus();
+    }
+
+    function loadPlotTargetIntoEditor(key) {
+        const target = getPlotTargets(plotData).find(t => t.key === key);
+        if (!target) return;
+        activePlotTargetKey = key;
+        descEl.value = target.get(plotData);
+        updateCount();
+        setSaveState("idle", "대기중");
+        rebuildPlotDropdown();
+    }
+
+    async function fetchPlotFresh() {
+        if (!capturedAuth || !lastPlotId) return null;
+        try {
+            const res = await originalFetch(PLOT_URL(lastPlotId), {
+                headers: { "Authorization": capturedAuth }
+            });
+            if (!res.ok) return null;
+            return await res.json();
+        } catch {
+            return null;
+        }
+    }
+
+    async function refreshPlotData(preserveTarget) {
+        const fresh = await fetchPlotFresh();
+        if (!fresh) {
+            setSaveState("error", "불러오기 실패 ❌");
+            return false;
+        }
+        plotData = fresh;
+        const targets = getPlotTargets(plotData);
+        if (preserveTarget && targets.find(t => t.key === activePlotTargetKey)) {
+            loadPlotTargetIntoEditor(activePlotTargetKey);
+        } else if (targets.length) {
+            loadPlotTargetIntoEditor(targets[0].key);
+        }
+        updateStatus();
+        return true;
     }
 
     function refreshRoomUI() {
@@ -455,6 +556,11 @@
     let saveQueued = false;
 
     async function doAutoSave() {
+        if (mode === "persona") return doAutoSavePersona();
+        return doAutoSavePlot();
+    }
+
+    async function doAutoSavePersona() {
         if (!activePersonaId) return;
         if (!capturedAuth) {
             setSaveState("error", "인증 없음 ❌");
@@ -500,6 +606,73 @@
         }
     }
 
+    async function doAutoSavePlot() {
+        if (!activePlotTargetKey) return;
+        if (!capturedAuth || !lastPlotId) {
+            setSaveState("error", "인증/plotId 없음 ❌");
+            return;
+        }
+        if (saveInFlight) {
+            saveQueued = true;
+            return;
+        }
+        saveInFlight = true;
+        setSaveState("saving", "저장 중... (최신본 확인 중)");
+
+        const newText = descEl.value;
+        const targetKey = activePlotTargetKey;
+
+        try {
+            // 저장 직전에 항상 서버 최신본을 다시 받아온다 — 이 필드 말고는
+            // 절대 안 건드리기 위한 안전장치 (다른 곳에서 그 사이 수정됐어도 보존됨).
+            const fresh = await fetchPlotFresh();
+            if (!fresh) {
+                setSaveState("error", "최신본 못 가져옴 ❌");
+                return;
+            }
+
+            const targets = getPlotTargets(fresh);
+            const target = targets.find(t => t.key === targetKey);
+            if (!target) {
+                setSaveState("error", "대상 필드를 못 찾음 ❌");
+                return;
+            }
+            target.set(fresh, newText);
+
+            const res = await originalFetch(PLOT_URL(lastPlotId), {
+                method: "PUT",
+                headers: {
+                    "Content-Type": "application/json",
+                    "Authorization": capturedAuth
+                },
+                body: JSON.stringify(fresh)
+            });
+
+            if (res.ok) {
+                plotData = fresh; // 방금 저장한 상태를 그대로 로컬 캐시로 반영
+                setSaveState("saved", "저장됨 ✅");
+                rebuildPlotDropdown();
+            } else {
+                const t = await res.text().catch(() => "");
+                let friendly = `실패 ❌ (HTTP ${res.status})`;
+                if (t.includes("PLOT_CONTENT_CONSTRAINT_VIOLATION")) {
+                    friendly = "실패 ❌ 글자수 제한 초과 (기본설정+나레이터+캐릭터 합쳐 1200자)";
+                }
+                setSaveState("error", friendly);
+                console.error("🩶 PersonaEditor(plot) 저장 실패:", res.status, t);
+            }
+        } catch (err) {
+            setSaveState("error", "네트워크 오류 ❌");
+            console.error("🩶 PersonaEditor(plot) 네트워크 오류:", err);
+        } finally {
+            saveInFlight = false;
+            if (saveQueued) {
+                saveQueued = false;
+                doAutoSave();
+            }
+        }
+    }
+
     descEl.addEventListener("input", () => {
         updateCount();
         if (getAutosaveEnabled()) {
@@ -527,33 +700,79 @@
     });
 
     selectEl.addEventListener("change", () => {
-        userPickedManually = true;
-        loadPersonaIntoEditor(selectEl.value);
-    });
-
-    el("refresh").addEventListener("click", async () => {
-        if (!capturedAuth || !lastPlotId) {
-            updateStatus();
+        const hasUnsaved = saveStateEl.textContent.includes("저장 필요") || saveStateEl.textContent.includes("입력 중");
+        if (mode === "plot" && hasUnsaved && !confirm("저장 안 된 수정사항이 있어요. 그냥 다른 항목으로 바꿀까요? (지금 내용은 사라져요)")) {
+            selectEl.value = activePlotTargetKey;
             return;
         }
-        try {
-            const url = `https://api.zeta-ai.io/v1/user-chat-profiles?plotId=${lastPlotId}`;
-            const res = await originalFetch(url, { headers: { "Authorization": capturedAuth } });
-            if (res.ok) {
-                const data = await res.json();
-                if (Array.isArray(data.userChatProfiles)) {
-                    personaList = data.userChatProfiles;
-                    if (!activePersonaId || !personaList.find(p => p.id === activePersonaId)) {
-                        const sel = personaList.find(p => p.selected);
-                        if (sel) loadPersonaIntoEditor(sel.id);
-                    }
-                    rebuildPersonaDropdown();
-                }
+        if (mode === "persona") {
+            userPickedManually = true;
+            loadPersonaIntoEditor(selectEl.value);
+        } else {
+            loadPlotTargetIntoEditor(selectEl.value);
+        }
+    });
+
+    async function switchMode(newMode) {
+        if (mode === newMode) return;
+        mode = newMode;
+        modePersonaBtn.classList.toggle("active", mode === "persona");
+        modePlotBtn.classList.toggle("active", mode === "plot");
+        clearTimeout(saveDebounce);
+
+        if (mode === "persona") {
+            if (personaList.length) {
+                rebuildPersonaDropdown();
+                if (activePersonaId) loadPersonaIntoEditor(activePersonaId);
+            } else {
+                selectEl.innerHTML = "<option>새로고침 눌러주세요</option>";
+                descEl.value = "";
+                updateCount();
             }
-        } catch (err) {
-            console.error("🩶 PersonaEditor 새로고침 실패:", err);
+        } else {
+            if (plotData) {
+                rebuildPlotDropdown();
+                if (activePlotTargetKey) loadPlotTargetIntoEditor(activePlotTargetKey);
+            } else {
+                selectEl.innerHTML = "<option>불러오는 중...</option>";
+                descEl.value = "";
+                updateCount();
+                await refreshPlotData(false);
+            }
         }
         updateStatus();
+    }
+
+    modePersonaBtn.addEventListener("click", () => switchMode("persona"));
+    modePlotBtn.addEventListener("click", () => switchMode("plot"));
+
+    el("refresh").addEventListener("click", async () => {
+        if (mode === "persona") {
+            if (!capturedAuth || !lastPlotId) {
+                updateStatus();
+                return;
+            }
+            try {
+                const url = `https://api.zeta-ai.io/v1/user-chat-profiles?plotId=${lastPlotId}`;
+                const res = await originalFetch(url, { headers: { "Authorization": capturedAuth } });
+                if (res.ok) {
+                    const data = await res.json();
+                    if (Array.isArray(data.userChatProfiles)) {
+                        personaList = data.userChatProfiles;
+                        if (!activePersonaId || !personaList.find(p => p.id === activePersonaId)) {
+                            const sel = personaList.find(p => p.selected);
+                            if (sel) loadPersonaIntoEditor(sel.id);
+                        }
+                        rebuildPersonaDropdown();
+                    }
+                }
+            } catch (err) {
+                console.error("🩶 PersonaEditor 새로고침 실패:", err);
+            }
+            updateStatus();
+        } else {
+            await refreshPlotData(true);
+        }
     });
 
     el("reset-pos").addEventListener("click", () => {
@@ -574,10 +793,13 @@
             personaList = [];
             activePersonaId = null;
             userPickedManually = false;
+            plotData = null;
+            activePlotTargetKey = null;
             selectEl.innerHTML = "<option>불러오는 중...</option>";
             descEl.value = "";
             updateCount();
             refreshRoomUI();
+            if (mode === "plot") refreshPlotData(false);
         }
     }, 1000);
 
@@ -667,9 +889,12 @@
 
     window.ZetaPersonaEditor = {
         version: VERSION,
+        get mode() { return mode; },
         get roomId() { return roomId; },
         get personaList() { return personaList; },
         get activePersonaId() { return activePersonaId; },
+        get plotData() { return plotData; },
+        get activePlotTargetKey() { return activePlotTargetKey; },
         get hasAuth() { return !!capturedAuth; }
     };
 
