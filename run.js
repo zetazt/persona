@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Zeta Persona Quick Editor
 // @namespace    zeta-persona-editor
-// @version      1.3.0
+// @version      1.4.0
 // @description  현재 방의 유저 페르소나를 자동으로 불러와서, 페이지 이동 없이 바로 수정/자동저장하는 미니 에디터
 // @match        https://zeta-ai.io/*
 // @match        https://*.zeta-ai.io/*
@@ -14,7 +14,7 @@
     "use strict";
 
     // ==========================
-    // Zeta Persona Quick Editor v1.3.0
+    // Zeta Persona Quick Editor v1.4.0
     //
     // 원리:
     // - 유저노트/마커/base+note 조합 없음. 그냥 필드 값을 있는 그대로
@@ -39,7 +39,7 @@
     }
     window.__ZETA_PERSONA_EDITOR_RUNNING__ = true;
 
-    const VERSION = "1.3.0";
+    const VERSION = "1.4.0";
 
     const PROFILES_LIST_RE = /\/v1\/user-chat-profiles(?:\?|$)/;
     const PLOT_ROOM_RE = /\/plots\/([^/]+)\/rooms\/([^/]+)\//;
@@ -242,6 +242,15 @@
   .status.bad { border-color: #6b4a2f; color: #ffb347; }
 
   .count-row { display:flex; justify-content:space-between; align-items:center; font-size: 10px; color:#999; margin-top:4px; }
+
+  .error-detail {
+    display: none;
+    font-family: monospace;
+    font-size: 10px; line-height: 1.4; color: #ff8a8a;
+    background: #2a1717; border: 1px solid #5a2f2f; border-radius: 8px;
+    padding: 6px 8px; margin-top: 6px; word-break: break-all; white-space: pre-wrap;
+  }
+  .error-detail.show { display: block; }
   .save-state { font-size: 10px; white-space: nowrap; }
   .save-state.saving { color: #ffb347; }
   .save-state.saved { color: #9fd39f; }
@@ -275,6 +284,8 @@
     <span class="save-state idle" id="save-state">대기중</span>
   </div>
 
+  <div class="error-detail" id="error-detail"></div>
+
   <div class="row">
     <label style="flex:1;display:flex;align-items:center;gap:6px;font-size:11px;color:#ccc;">
       <input type="checkbox" id="autosave-toggle"> 자동저장
@@ -304,6 +315,7 @@
     const descEl = el("desc");
     const countEl = el("count");
     const saveStateEl = el("save-state");
+    const errorDetailEl = el("error-detail");
     const autosaveToggleEl = el("autosave-toggle");
     const manualSaveBtn = el("manual-save");
     const modePersonaBtn = el("mode-persona");
@@ -328,6 +340,16 @@
     function setSaveState(state, label) {
         saveStateEl.className = "save-state " + state;
         saveStateEl.textContent = label;
+    }
+
+    function showErrorDetail(text) {
+        errorDetailEl.textContent = text;
+        errorDetailEl.classList.add("show");
+    }
+
+    function clearErrorDetail() {
+        errorDetailEl.textContent = "";
+        errorDetailEl.classList.remove("show");
     }
 
     function updateStatus() {
@@ -382,7 +404,7 @@
         activePersonaId = id;
         descEl.value = p.description || "";
         updateCount();
-        setSaveState("idle", "대기중");
+        setSaveState("idle", "대기중"); clearErrorDetail();
         rebuildPersonaDropdown();
     }
 
@@ -425,7 +447,7 @@
         activePlotTargetKey = key;
         descEl.value = target.get(plotData);
         updateCount();
-        setSaveState("idle", "대기중");
+        setSaveState("idle", "대기중"); clearErrorDetail();
         rebuildPlotDropdown();
     }
 
@@ -576,6 +598,7 @@
         }
         saveInFlight = true;
         setSaveState("saving", "저장 중...");
+        clearErrorDetail();
 
         const persona = personaList.find(p => p.id === activePersonaId);
         const newDesc = descEl.value;
@@ -596,10 +619,12 @@
             } else {
                 const t = await res.text().catch(() => "");
                 setSaveState("error", `실패 ❌ (HTTP ${res.status})`);
+                showErrorDetail(t || "(응답 본문 없음)");
                 console.error("🩶 PersonaEditor 저장 실패:", res.status, t);
             }
         } catch (err) {
             setSaveState("error", "네트워크 오류 ❌");
+            showErrorDetail(String(err && err.message));
             console.error("🩶 PersonaEditor 네트워크 오류:", err);
         } finally {
             saveInFlight = false;
@@ -622,6 +647,7 @@
         }
         saveInFlight = true;
         setSaveState("saving", "저장 중... (최신본 확인 중)");
+        clearErrorDetail();
 
         const newText = descEl.value;
         const targetKey = activePlotTargetKey;
@@ -660,13 +686,15 @@
                 const t = await res.text().catch(() => "");
                 let friendly = `실패 ❌ (HTTP ${res.status})`;
                 if (t.includes("PLOT_CONTENT_CONSTRAINT_VIOLATION")) {
-                    friendly = "실패 ❌ 글자수 제한 초과 (기본설정+나레이터+캐릭터 합쳐 1200자)";
+                    friendly = "실패 ❌ 글자수 제한 초과";
                 }
                 setSaveState("error", friendly);
+                showErrorDetail(t || "(응답 본문 없음)");
                 console.error("🩶 PersonaEditor(plot) 저장 실패:", res.status, t);
             }
         } catch (err) {
             setSaveState("error", "네트워크 오류 ❌");
+            showErrorDetail(String(err && err.message));
             console.error("🩶 PersonaEditor(plot) 네트워크 오류:", err);
         } finally {
             saveInFlight = false;
@@ -680,6 +708,7 @@
     descEl.addEventListener("input", () => {
         updateCount();
         updateStatus();
+        clearErrorDetail();
         if (getAutosaveEnabled()) {
             setSaveState("idle", "입력 중...");
             clearTimeout(saveDebounce);
