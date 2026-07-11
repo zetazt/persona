@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Zeta Persona Quick Editor
 // @namespace    zeta-persona-editor
-// @version      1.4.1
+// @version      1.4.2
 // @description  현재 방의 유저 페르소나를 자동으로 불러와서, 페이지 이동 없이 바로 수정/자동저장하는 미니 에디터
 // @match        https://zeta-ai.io/*
 // @match        https://*.zeta-ai.io/*
@@ -14,7 +14,7 @@
     "use strict";
 
     // ==========================
-    // Zeta Persona Quick Editor v1.4.1
+    // Zeta Persona Quick Editor v1.4.2
     //
     // 원리:
     // - 유저노트/마커/base+note 조합 없음. 그냥 필드 값을 있는 그대로
@@ -39,7 +39,7 @@
     }
     window.__ZETA_PERSONA_EDITOR_RUNNING__ = true;
 
-    const VERSION = "1.4.1";
+    const VERSION = "1.4.2";
 
     const PROFILES_LIST_RE = /\/v1\/user-chat-profiles(?:\?|$)/;
     const PLOT_ROOM_RE = /\/plots\/([^/]+)\/rooms\/([^/]+)\//;
@@ -635,6 +635,24 @@
         }
     }
 
+    // 실제로 성공했던 PUT 요청(Network 탭에서 캡처된 진짜 페이로드)에
+    // 있던 최상위 필드만 정확히 골라서 보낸다. GET 응답엔 이거 말고도
+    // 여분의 필드가 섞여있을 수 있는데, 그걸 그대로 보내면 서버가
+    // "Failed to read HTTP message"로 거부하는 것으로 보임.
+    const PLOT_PUT_FIELDS = [
+        "plotId", "chatProfiles", "shortDescription", "hashtags", "isAboutPublic", "about",
+        "isCreatorCommentPublic", "creatorComment", "isExampleConversationPublic",
+        "unlimitedMonitoringStatus", "unlimitedReExaminationCount", "unlimitedMonitoringCompletedAt",
+        "lorebookIds", "stylePreset", "infoBoxSetting", "cyoaSetting", "name",
+        "longDescription", "narrator", "characters", "intros", "exampleConversations"
+    ];
+
+    function buildPlotPutBody(fresh) {
+        const out = {};
+        PLOT_PUT_FIELDS.forEach(k => { if (k in fresh) out[k] = fresh[k]; });
+        return out;
+    }
+
     async function doAutoSavePlot() {
         if (!activePlotTargetKey) return;
         if (!capturedAuth || !lastPlotId) {
@@ -669,7 +687,7 @@
             }
             target.set(fresh, newText);
 
-            const bodyStr = JSON.stringify(fresh);
+            const bodyStr = JSON.stringify(buildPlotPutBody(fresh));
 
             const res = await originalFetch(PLOT_URL(lastPlotId), {
                 method: "PUT",
