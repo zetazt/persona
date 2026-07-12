@@ -19,7 +19,7 @@
     }
     window.__ZETA_PERSONA_EDITOR_RUNNING__ = true;
 
-    const VERSION = "2.3.0";
+    const VERSION = "2.3.1";
 
     const PROFILES_LIST_RE = /\/v1\/user-chat-profiles(?:\?|$)/;
     const PLOT_ROOM_RE = /\/plots\/([^/]+)\/rooms\/([^/]+)\//;
@@ -496,7 +496,12 @@
         const customActive = hasActiveCustomPersona();
         recTargets.forEach((t, idx) => {
             // 내 페르소나 쪽이 선택돼 있으면 추천프로필은 절대 연결됨(🔗)으로 표시하지 않는다.
-            const isActive = !customActive && !!(recMeData && recMeData.plotChatProfileId === t.key);
+            // [v2.3.1] recMeData.plotChatProfileId가 있다고 무조건 연결된 게 아니다 —
+            // 그 기록이 "이 방에서 한 번이라도 커스터마이징된 적 있는 프로필"이라는 뜻일 뿐일 수 있고,
+            // 진짜 지금 활성화된 건지는 recMeData.selected 필드로 확인해야 한다.
+            // (selected:false인데 plotChatProfileId만 남아있는 경우가 실제로 확인됨 → 이게 기본
+            // 프로필에 엉뚱하게 🔗가 붙던 원인.)
+            const isActive = !customActive && !!(recMeData && recMeData.plotChatProfileId === t.key && recMeData.selected);
             entries.push({
                 value: REC_KEY_PREFIX + t.key,
                 label: `${isActive ? "🔗 " : ""}${t.label} (${t.get().length}자)`,
