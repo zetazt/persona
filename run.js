@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Zeta Persona Quick Editor
 // @namespace    zeta-persona-editor
-// @version      1.9.0
+// @version      2.0.0
 // @description  현재 방의 유저 페르소나(+추천 프로필) / {{char}} 상세를 자동으로 불러와서, 페이지 이동 없이 바로 수정/자동저장하는 미니 에디터
 // @match        https://zeta-ai.io/*
 // @match        https://*.zeta-ai.io/*
@@ -19,7 +19,7 @@
     }
     window.__ZETA_PERSONA_EDITOR_RUNNING__ = true;
 
-    const VERSION = "1.9.0";
+    const VERSION = "2.0.0";
 
     const PROFILES_LIST_RE = /\/v1\/user-chat-profiles(?:\?|$)/;
     const PLOT_ROOM_RE = /\/plots\/([^/]+)\/rooms\/([^/]+)\//;
@@ -27,6 +27,8 @@
     const PROFILE_PATCH_URL = (id) => `https://api.zeta-ai.io/v1/user-chat-profiles/${id}`;
     const PLOT_URL = (id) => `https://api.zeta-ai.io/v1/plots/${id}`;
     const PLOT_STATUS_URL = (id) => `https://api.zeta-ai.io/v1/plots/${id}/status`;
+    const LOREBOOK_URL = (id) => `https://api.zeta-ai.io/v1/lorebooks/${id}`;
+    const LOREBOOK_LIST_URL = (cursor) => `https://api.zeta-ai.io/v1/lorebooks?limit=15` + (cursor ? `&cursor=${encodeURIComponent(cursor)}` : "");
     const PLOT_CREATOR_URL = (id) => `https://api.zeta-ai.io/v1/plots/${id}/creator`;
     const ROOM_URL = (id) => `https://api.zeta-ai.io/v1/rooms/${id}`;
     const REC_PATCH_URL = (roomId) => `https://api.zeta-ai.io/v1/rooms/${roomId}/user-plot-chat-profiles/me`;
@@ -35,11 +37,14 @@
     function isRecKey(key) { return typeof key === "string" && key.indexOf(REC_KEY_PREFIX) === 0; }
     function recIdFromKey(key) { return key.slice(REC_KEY_PREFIX.length); }
 
-    let mode = "persona"; // "persona" | "plot"
+    let mode = "persona"; // "persona" | "plot" | "lorebook"
     let plotData = null;          // /creator 전체 응답 (draft 포함) 캐시
     let activePlotTargetKey = null;
     let recRoomData = null;       // /rooms/{roomId} 전체 응답 캐시 (추천 프로필 목록/이름/이미지용)
     let recMeData = null;         // /rooms/{roomId}/user-plot-chat-profiles/me 응답 캐시 (유저창 실제 설명)
+    let myLorebooks = [];         // 내 로어북 전체 목록 (각 항목까지 포함)
+    let activeLorebookId = null;
+    let activeLorebookItemId = null;
 
     const POS_KEY = "zeta-persona-editor-pos";
     const AUTOSAVE_KEY = "zeta-persona-editor-autosave";
@@ -258,9 +263,15 @@
   <div class="row" style="margin-top:0;">
     <button class="mode-btn active" id="mode-persona">{{user}}</button>
     <button class="mode-btn" id="mode-plot">{{char}}</button>
+    <button class="mode-btn" id="mode-lorebook">로어북</button>
   </div>
 
   <div class="status" id="status" style="margin-top:8px;">감지 중...</div>
+
+  <select id="lorebook-select" style="display:none;"><option>불러오는 중...</option></select>
+  <div class="row" id="lorebook-link-row" style="display:none;">
+    <button id="lorebook-link-toggle">연결 상태 확인 중...</button>
+  </div>
 
   <select id="target-select"><option>불러오는 중...</option></select>
 
@@ -307,6 +318,10 @@
     const manualSaveBtn = el("manual-save");
     const modePersonaBtn = el("mode-persona");
     const modePlotBtn = el("mode-plot");
+    const modeLorebookBtn = el("mode-lorebook");
+    const lorebookSelectEl = el("lorebook-select");
+    const lorebookLinkRowEl = el("lorebook-link-row");
+    const lorebookLinkToggleBtn = el("lorebook-link-toggle");
 
     const BTN_SIZE = 32;
     const BTN_MARGIN = 4;
@@ -386,7 +401,7 @@
                 statusEl.className = "status ok";
                 statusEl.textContent = `✅ 추천 ${recCount}개 + 내 페르소나 ${personaList.length}개 로드됨`;
             }
-        } else {
+        } else if (mode === "plot") {
             const draft = getDraft(plotData);
             if (!draft) {
                 statusEl.className = "status bad";
@@ -399,10 +414,23 @@
                 statusEl.className = "status ok";
                 statusEl.textContent = `✅ ${draft.name || "(이름없음)"} 상세 로드됨 · 합계 ${total}자 (기본+내레+캐릭)`;
             }
+        } else {
+            if (myLorebooks.length === 0) {
+                statusEl.className = "status bad";
+                statusEl.textContent = "⚠ 로어북 목록 아직 못 불러옴 → '새로고침' 눌러주세요";
+            } else {
+                const lb = myLorebooks.find(x => x.id === activeLorebookId);
+                statusEl.className = "status ok";
+                statusEl.textContent = lb
+                    ? `✅ 내 로어북 ${myLorebooks.length}개 중 "${lb.title}" 편집 중`
+                    : `✅ 내 로어북 ${myLorebooks.length}개 로드됨`;
+            }
         }
         btnEl.classList.toggle("no-auth", !capturedAuth);
         btnEl.classList.toggle("ready", !!(capturedAuth && (
-            mode === "persona" ? (personaList.length || getRecTargets(recRoomData).length) : getDraft(plotData)
+            mode === "persona" ? (personaList.length || getRecTargets(recRoomData).length) :
+            mode === "plot" ? getDraft(plotData) :
+            myLorebooks.length
         )));
     }
 
@@ -574,6 +602,268 @@
         return true;
     }
 
+    //------------------------------------------
+    // 로어북 모드
+    //------------------------------------------
+
+    async function fetchMyLorebooks() {
+        if (!capturedAuth) return [];
+        const all = [];
+        let cursor = null;
+        for (let page = 0; page < 5; page++) { // 최대 5페이지(75개)까지만, 무한루프 방지
+            try {
+                const res = await originalFetch(LOREBOOK_LIST_URL(cursor), {
+                    headers: { "Authorization": capturedAuth }
+                });
+                if (!res.ok) break;
+                const data = await res.json();
+                if (Array.isArray(data.lorebooks)) all.push(...data.lorebooks);
+                if (!data.nextCursor) break;
+                cursor = data.nextCursor;
+            } catch {
+                break;
+            }
+        }
+        return all;
+    }
+
+    async function refreshMyLorebooks(preserveSelection) {
+        const list = await fetchMyLorebooks();
+        myLorebooks = list;
+        rebuildLorebookSelect();
+        if (preserveSelection && activeLorebookId && list.find(lb => lb.id === activeLorebookId)) {
+            loadLorebookIntoEditor(activeLorebookId, true);
+        } else if (list.length) {
+            loadLorebookIntoEditor(list[0].id);
+        }
+        updateStatus();
+        return list.length > 0;
+    }
+
+    function currentDraftLorebookIds() {
+        const draft = getDraft(plotData);
+        return (draft && Array.isArray(draft.lorebookIds)) ? draft.lorebookIds : null;
+    }
+
+    function rebuildLorebookSelect() {
+        lorebookSelectEl.innerHTML = "";
+        const linkedIds = currentDraftLorebookIds();
+        myLorebooks.forEach(lb => {
+            const opt = document.createElement("option");
+            opt.value = lb.id;
+            const linkedMark = linkedIds && linkedIds.includes(lb.id) ? "🔗 " : "";
+            opt.textContent = `${linkedMark}${lb.title || "(제목없음)"} (${(lb.items || []).length}항목)`;
+            if (lb.id === activeLorebookId) opt.selected = true;
+            lorebookSelectEl.appendChild(opt);
+        });
+    }
+
+    function updateLorebookLinkButton() {
+        const linkedIds = currentDraftLorebookIds();
+        if (!activeLorebookId || !linkedIds) {
+            lorebookLinkToggleBtn.textContent = "연결 상태 확인 중...";
+            lorebookLinkToggleBtn.disabled = true;
+            return;
+        }
+        lorebookLinkToggleBtn.disabled = false;
+        if (linkedIds.includes(activeLorebookId)) {
+            lorebookLinkToggleBtn.textContent = "🔗 이 방에 연결됨 (해제하기)";
+        } else {
+            lorebookLinkToggleBtn.textContent = "⛓️‍💥 연결 안 됨 (연결하기)";
+        }
+    }
+
+    function getLorebookItems(lb) {
+        if (!lb) return [];
+        return (lb.items || []).map(it => ({
+            key: it.id,
+            label: `📄 ${it.name || "(이름없음)"}`,
+            get: () => it.content || "",
+            set: (v) => { it.content = v; }
+        }));
+    }
+
+    function rebuildLorebookItemDropdown() {
+        const lb = myLorebooks.find(x => x.id === activeLorebookId);
+        selectEl.innerHTML = "";
+        getLorebookItems(lb).forEach(t => {
+            const opt = document.createElement("option");
+            opt.value = t.key;
+            opt.textContent = `${t.label} (${t.get().length}자)`;
+            if (t.key === activeLorebookItemId) opt.selected = true;
+            selectEl.appendChild(opt);
+        });
+        updateStatus();
+    }
+
+    function loadLorebookItemIntoEditor(itemId) {
+        const lb = myLorebooks.find(x => x.id === activeLorebookId);
+        const target = getLorebookItems(lb).find(t => t.key === itemId);
+        if (!target) return;
+        activeLorebookItemId = itemId;
+        descEl.value = target.get();
+        updateCount();
+        setSaveState("idle", "대기중"); clearErrorDetail();
+        rebuildLorebookItemDropdown();
+    }
+
+    function loadLorebookIntoEditor(lorebookId, skipItemReset) {
+        activeLorebookId = lorebookId;
+        const lb = myLorebooks.find(x => x.id === lorebookId);
+        const items = getLorebookItems(lb);
+        rebuildLorebookSelect();
+        updateLorebookLinkButton();
+        if (!skipItemReset || !items.find(t => t.key === activeLorebookItemId)) {
+            if (items.length) loadLorebookItemIntoEditor(items[0].key);
+        } else {
+            rebuildLorebookItemDropdown();
+        }
+        updateStatus();
+    }
+
+    // 로어북 저장 — GET 응답 그대로 PUT하면 안 되고, 알려진 필드만 골라서 보내야 함
+    // (id/createdAt/updatedAt/creator/stats 등은 PUT에서 안 받는 읽기 전용 필드).
+    function buildLorebookPutBody(lb) {
+        return {
+            title: lb.title || "",
+            description: lb.description || "",
+            items: (lb.items || []).map(it => ({
+                id: it.id,
+                name: it.name,
+                keywords: it.keywords || [],
+                content: it.content || ""
+            })),
+            isSharingEnabled: !!lb.isSharingEnabled
+        };
+    }
+
+    async function doAutoSaveLorebookItem() {
+        if (!activeLorebookId || !activeLorebookItemId) return;
+        if (!capturedAuth) {
+            setSaveState("error", "인증 없음 ❌");
+            return;
+        }
+        if (saveInFlight) {
+            saveQueued = true;
+            return;
+        }
+        saveInFlight = true;
+        setSaveState("saving", "저장 중...");
+        clearErrorDetail();
+
+        const newText = descEl.value;
+
+        try {
+            // 저장 직전 서버 최신본을 다시 받아온다 (다른 항목이 그 사이 바뀌었을 수 있으므로).
+            const res0 = await originalFetch(LOREBOOK_URL(activeLorebookId), {
+                headers: { "Authorization": capturedAuth }
+            });
+            if (!res0.ok) {
+                setSaveState("error", "최신본 못 가져옴 ❌");
+                return;
+            }
+            const fresh = await res0.json();
+            const item = (fresh.items || []).find(it => it.id === activeLorebookItemId);
+            if (!item) {
+                setSaveState("error", "대상 항목을 못 찾음 ❌");
+                return;
+            }
+            item.content = sanitizeSurrogates(newText);
+
+            const bodyStr = JSON.stringify(buildLorebookPutBody(fresh));
+
+            const res = await originalFetch(LOREBOOK_URL(activeLorebookId), {
+                method: "PUT",
+                headers: {
+                    "Content-Type": "application/json",
+                    "Authorization": capturedAuth
+                },
+                body: bodyStr
+            });
+
+            if (res.ok) {
+                const idx = myLorebooks.findIndex(x => x.id === activeLorebookId);
+                if (idx !== -1) myLorebooks[idx] = fresh;
+                setSaveState("saved", "저장됨 ✅");
+                rebuildLorebookItemDropdown();
+            } else {
+                const t = await res.text().catch(() => "");
+                setSaveState("error", `실패 ❌ (HTTP ${res.status})`);
+                showErrorDetail((t || "(응답 본문 없음)") + `\n\n[전송 body 길이: ${bodyStr.length}자]`);
+                console.error("🩶 PersonaEditor(lorebook) 저장 실패:", res.status, t);
+            }
+        } catch (err) {
+            setSaveState("error", "네트워크 오류 ❌");
+            showErrorDetail(String(err && err.message));
+            console.error("🩶 PersonaEditor(lorebook) 네트워크 오류:", err);
+        } finally {
+            saveInFlight = false;
+            if (saveQueued) {
+                saveQueued = false;
+                doAutoSave();
+            }
+        }
+    }
+
+    // {{char}} 저장(PUT+RELEASE)과 같은 안전장치(저장 직전 최신본 재확인)를 써서
+    // lorebookIds 배열만 토글한다.
+    async function doToggleLorebookLink() {
+        if (!activeLorebookId || !capturedAuth || !lastPlotId) return;
+        lorebookLinkToggleBtn.disabled = true;
+        lorebookLinkToggleBtn.textContent = "처리 중...";
+
+        try {
+            const fresh = await fetchPlotFresh();
+            if (!fresh || !fresh.draft) {
+                showErrorDetail("최신 {{char}} 정보를 못 가져와서 연결 상태를 바꿀 수 없어요.");
+                updateLorebookLinkButton();
+                return;
+            }
+            const draft = fresh.draft;
+            if (!Array.isArray(draft.lorebookIds)) draft.lorebookIds = [];
+
+            const idx = draft.lorebookIds.indexOf(activeLorebookId);
+            if (idx === -1) {
+                draft.lorebookIds.push(activeLorebookId);
+            } else {
+                draft.lorebookIds.splice(idx, 1);
+            }
+
+            const bodyStr = sanitizeSurrogates(JSON.stringify(buildPlotPutBody(fresh)));
+            const res = await originalFetch(PLOT_URL(lastPlotId), {
+                method: "PUT",
+                headers: { "Content-Type": "application/json", "Authorization": capturedAuth },
+                body: bodyStr
+            });
+
+            if (!res.ok) {
+                const t = await res.text().catch(() => "");
+                showErrorDetail(`연결 상태 변경 실패 ❌ (HTTP ${res.status})\n` + (t || "(응답 본문 없음)"));
+                updateLorebookLinkButton();
+                return;
+            }
+
+            const relRes = await originalFetch(PLOT_STATUS_URL(lastPlotId), {
+                method: "PATCH",
+                headers: { "Content-Type": "application/json", "Authorization": capturedAuth },
+                body: JSON.stringify({ status: "RELEASE" })
+            });
+
+            plotData = fresh;
+            if (relRes.ok) {
+                clearErrorDetail();
+            } else {
+                const relT = await relRes.text().catch(() => "");
+                showErrorDetail(`연결은 저장됐지만 반영 실패 ❌ (HTTP ${relRes.status})\n` + (relT || "(응답 본문 없음)"));
+            }
+            rebuildLorebookSelect();
+            updateLorebookLinkButton();
+        } catch (err) {
+            showErrorDetail("네트워크 오류: " + String(err && err.message));
+            updateLorebookLinkButton();
+        }
+    }
+
     function refreshRoomUI() {
         roomEl.textContent = `Room: ${roomId.slice(0, 24)}`;
         updateStatus();
@@ -686,6 +976,7 @@
             if (isRecKey(activePersonaId)) return doAutoSaveRec();
             return doAutoSavePersona();
         }
+        if (mode === "lorebook") return doAutoSaveLorebookItem();
         return doAutoSavePlot();
     }
 
@@ -954,24 +1245,40 @@
 
     selectEl.addEventListener("change", () => {
         const hasUnsaved = saveStateEl.textContent.includes("저장 필요") || saveStateEl.textContent.includes("입력 중");
-        const isLimitedTarget = mode === "plot" || (mode === "persona" && isRecKey(selectEl.value));
+        const isLimitedTarget = mode === "plot" || mode === "lorebook" || (mode === "persona" && isRecKey(selectEl.value));
         if (isLimitedTarget && hasUnsaved && !confirm("저장 안 된 수정사항이 있어요. 그냥 다른 항목으로 바꿀까요? (지금 내용은 사라져요)")) {
-            selectEl.value = mode === "persona" ? activePersonaId : activePlotTargetKey;
+            selectEl.value = mode === "persona" ? activePersonaId : (mode === "plot" ? activePlotTargetKey : activeLorebookItemId);
             return;
         }
         if (mode === "persona") {
             userPickedManually = true;
             loadPersonaIntoEditor(selectEl.value);
+        } else if (mode === "lorebook") {
+            loadLorebookItemIntoEditor(selectEl.value);
         } else {
             loadPlotTargetIntoEditor(selectEl.value);
         }
     });
+
+    lorebookSelectEl.addEventListener("change", () => {
+        const hasUnsaved = saveStateEl.textContent.includes("저장 필요") || saveStateEl.textContent.includes("입력 중");
+        if (hasUnsaved && !confirm("저장 안 된 수정사항이 있어요. 다른 로어북으로 바꿀까요? (지금 내용은 사라져요)")) {
+            lorebookSelectEl.value = activeLorebookId;
+            return;
+        }
+        loadLorebookIntoEditor(lorebookSelectEl.value);
+    });
+
+    lorebookLinkToggleBtn.addEventListener("click", doToggleLorebookLink);
 
     async function switchMode(newMode) {
         if (mode === newMode) return;
         mode = newMode;
         modePersonaBtn.classList.toggle("active", mode === "persona");
         modePlotBtn.classList.toggle("active", mode === "plot");
+        modeLorebookBtn.classList.toggle("active", mode === "lorebook");
+        lorebookSelectEl.style.display = mode === "lorebook" ? "" : "none";
+        lorebookLinkRowEl.style.display = mode === "lorebook" ? "" : "none";
         clearTimeout(saveDebounce);
 
         if (mode === "persona") {
@@ -998,7 +1305,7 @@
                 descEl.value = "";
                 updateCount();
             }
-        } else {
+        } else if (mode === "plot") {
             if (getDraft(plotData)) {
                 rebuildPlotDropdown();
                 if (activePlotTargetKey) loadPlotTargetIntoEditor(activePlotTargetKey);
@@ -1008,12 +1315,30 @@
                 updateCount();
                 await refreshPlotData(false);
             }
+        } else {
+            // lorebook 모드는 plot draft(lorebookIds 연결 상태 표시용)도 같이 필요하다.
+            if (!getDraft(plotData)) await refreshPlotData(false);
+            if (myLorebooks.length) {
+                rebuildLorebookSelect();
+                if (activeLorebookId) {
+                    loadLorebookIntoEditor(activeLorebookId, true);
+                } else if (myLorebooks.length) {
+                    loadLorebookIntoEditor(myLorebooks[0].id);
+                }
+            } else {
+                lorebookSelectEl.innerHTML = "<option>불러오는 중...</option>";
+                selectEl.innerHTML = "<option>불러오는 중...</option>";
+                descEl.value = "";
+                updateCount();
+                await refreshMyLorebooks(false);
+            }
         }
         updateStatus();
     }
 
     modePersonaBtn.addEventListener("click", () => switchMode("persona"));
     modePlotBtn.addEventListener("click", () => switchMode("plot"));
+    modeLorebookBtn.addEventListener("click", () => switchMode("lorebook"));
 
     el("refresh").addEventListener("click", async () => {
         if (mode === "persona") {
@@ -1045,8 +1370,11 @@
             }
             rebuildPersonaDropdown();
             updateStatus();
-        } else {
+        } else if (mode === "plot") {
             await refreshPlotData(true);
+        } else {
+            await refreshPlotData(true); // lorebookIds 연결 상태도 최신화
+            await refreshMyLorebooks(true);
         }
     });
 
@@ -1078,6 +1406,13 @@
                     rebuildPersonaDropdown();
                     tryApplySavedPersonaSelection();
                     rebuildPersonaDropdown();
+                    updateStatus();
+                });
+            }
+            if (mode === "lorebook") {
+                refreshPlotData(false).then(() => {
+                    rebuildLorebookSelect();
+                    updateLorebookLinkButton();
                     updateStatus();
                 });
             }
@@ -1166,6 +1501,8 @@
         get activePlotTargetKey() { return activePlotTargetKey; },
         get recRoomData() { return recRoomData; },
         get recMeData() { return recMeData; },
+        get myLorebooks() { return myLorebooks; },
+        get activeLorebookId() { return activeLorebookId; },
         get hasAuth() { return !!capturedAuth; }
     };
 
