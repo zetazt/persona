@@ -260,11 +260,40 @@
   }
   #panel.open { display: block; }
 
-  select, input[type="text"] {
+  /* 텍스트 입력칸(이름/키워드) 기본 스타일 */
+  input[type="text"] {
     width: 100%; background: #17181a; color: #fff;
     border: 1px solid #555; border-radius: 8px; padding: 7px 8px;
     font-size: 12px; margin-top: 6px;
   }
+
+  /* [수정] select(프로필/로어북/항목 목록)는 입력칸과 다른 색으로 눈에 띄게 구분.
+     "누르면 목록이 뜨는 창"이라는 것을 색으로 바로 알 수 있도록 함. */
+  select {
+    width: 100%;
+    background: #1b2636;
+    color: #dfe9ff;
+    border: 1px solid #4a90d9;
+    border-radius: 8px;
+    padding: 7px 26px 7px 8px;
+    font-size: 12px;
+    margin-top: 6px;
+    appearance: none;
+    -webkit-appearance: none;
+    background-image: linear-gradient(45deg, transparent 50%, #4a90d9 50%),
+                       linear-gradient(135deg, #4a90d9 50%, transparent 50%);
+    background-position: calc(100% - 15px) center, calc(100% - 10px) center;
+    background-size: 5px 5px, 5px 5px;
+    background-repeat: no-repeat;
+    cursor: pointer;
+  }
+  select:hover { border-color: #6fb1ff; }
+  select:focus {
+    outline: none;
+    border-color: #6fb1ff;
+    box-shadow: 0 0 0 2px rgba(74,144,217,0.25);
+  }
+  select option { background: #1b2636; color: #dfe9ff; }
 
   textarea {
     width: 100%; height: 30vh; background: #17181a; color: #fff;
