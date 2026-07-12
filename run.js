@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Zeta Persona Quick Editor
 // @namespace    zeta-persona-editor
-// @version      2.2.1
-// @description  현재 방의 유저 페르소나(+추천 프로필) / {{char}} 상세 / 로어북을 자동으로 불러와서, 페이지 이동 없이 바로 수정/자동저장하는 미니 에디터
+// @version      2.2.2
+// @description  현재 방의 유저 페르소나(+추천 프로필) / {{char}} 상세를 자동으로 불러와서, 페이지 이동 없이 바로 수정/자동저장하는 미니 에디터
 // @match        https://zeta-ai.io/*
 // @match        https://*.zeta-ai.io/*
 // @run-at       document-start
@@ -19,7 +19,7 @@
     }
     window.__ZETA_PERSONA_EDITOR_RUNNING__ = true;
 
-    const VERSION = "2.2.1";
+    const VERSION = "2.2.2";
 
     const PROFILES_LIST_RE = /\/v1\/user-chat-profiles(?:\?|$)/;
     const PLOT_ROOM_RE = /\/plots\/([^/]+)\/rooms\/([^/]+)\//;
@@ -450,14 +450,17 @@
         recTargets.forEach(t => {
             const opt = document.createElement("option");
             opt.value = REC_KEY_PREFIX + t.key;
-            opt.textContent = `${t.label} (${t.get().length}자)`;
+            const isActive = !!(recMeData && recMeData.plotChatProfileId === t.key);
+            const mark = isActive ? "🔗 " : "";
+            opt.textContent = `${mark}${t.label} (${t.get().length}자)`;
             if (opt.value === activePersonaId) opt.selected = true;
             selectEl.appendChild(opt);
         });
         personaList.forEach(p => {
             const opt = document.createElement("option");
             opt.value = p.id;
-            opt.textContent = `${p.name || "(이름없음)"} — ${(p.description || "").slice(0, 12)}${p.selected ? " ★" : ""}`;
+            const mark = p.selected ? "🔗 " : "";
+            opt.textContent = `${mark}${p.name || "(이름없음)"} — ${(p.description || "").slice(0, 12)}`;
             if (p.id === activePersonaId) opt.selected = true;
             selectEl.appendChild(opt);
         });
