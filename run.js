@@ -2,7 +2,7 @@
 // @name         Zeta Persona Quick Editor
 // @namespace    zeta-persona-editor
 // @version      2.2.6
-// @description  현재 방의 유저 페르소나(+추천 프로필) / {{char}} 상세를 자동으로 불러와서, 페이지 이동 없이 바로 수정/자동저장하는 미니 에디터
+// @description  현재 방의 유저 페르소나(+추천 프로필) / {{char}} 상세 / 로어북을 자동으로 불러와서, 페이지 이동 없이 바로 수정/자동저장하는 미니 에디터
 // @match        https://zeta-ai.io/*
 // @match        https://*.zeta-ai.io/*
 // @run-at       document-start
