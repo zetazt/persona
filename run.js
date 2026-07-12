@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Zeta Persona Quick Editor
 // @namespace    zeta-persona-editor
-// @version      2.2.8
+// @version      2.2.9
 // @description  현재 방의 유저 페르소나(+추천 프로필) / {{char}} 상세 / 로어북을 자동으로 불러와서, 페이지 이동 없이 바로 수정/자동저장하는 미니 에디터
 // @match        https://zeta-ai.io/*
 // @match        https://*.zeta-ai.io/*
@@ -19,7 +19,7 @@
     }
     window.__ZETA_PERSONA_EDITOR_RUNNING__ = true;
 
-    const VERSION = "2.2.8";
+    const VERSION = "2.2.9";
 
     const PROFILES_LIST_RE = /\/v1\/user-chat-profiles(?:\?|$)/;
     const PLOT_ROOM_RE = /\/plots\/([^/]+)\/rooms\/([^/]+)\//;
@@ -135,14 +135,33 @@
         return null;
     }
 
+    // [수정: v2.2.9] 예전에는 "이미 캐시된 plotId(knownPlotId)"가 있어야만 이 응답을 받아들였다.
+    // 그런데 방에 처음 들어갔을 때는 /plots/{id}/rooms/{id}/ 형태의 요청이 아직 한 번도
+    // 지나가지 않아서 knownPlotId가 비어있는 경우가 흔했고, 그러면 이 함수가 그냥 return 해버려서
+    // personaList가 계속 빈 배열로 남았다. (그래서 hasActiveCustomPersona()가 항상 false가 되고,
+    // recMeData의 부정확한 값에 기대게 되어 기본/추천 프로필에만 엉뚱하게 🔗가 붙었던 것.)
+    // 유저창을 한번 열었다 닫으면 그제서야 같은 요청이 다시 발생하면서 그때는 plotId가 이미
+    // 캐시돼 있어 정상 반영됐던 것이 이 버그의 정체.
+    //
+    // 응답 URL 자체에 이미 ?plotId=... 가 들어있으므로, 그 값을 그대로 신뢰해서 즉시 캐시하고
+    // personaList를 채우도록 바꿨다. lastPlotId가 이미 있는 상태에서 다른 plotId의 응답이
+    // (예: 방 이동 중 늦게 도착한 이전 방 응답) 섞여 들어오는 것은 여전히 걸러낸다.
     function handlePossiblePersonaListResponse(url, text, atRoomId) {
         try {
+            if (atRoomId !== roomId) return;
+
             const qm = PLOTID_QUERY_RE.exec(url || "");
             const urlPlotId = qm ? decodeURIComponent(qm[1]) : null;
-            const knownPlotId = getCachedPlotId(atRoomId);
+            if (!urlPlotId) return;
 
-            if (!knownPlotId || !urlPlotId || urlPlotId !== knownPlotId) return;
-            if (atRoomId !== roomId) return;
+            if (!lastPlotId) {
+                // 이 방의 plotId를 아직 몰랐다면, 이 응답의 plotId를 그대로 확정해서 캐시한다.
+                lastPlotId = urlPlotId;
+                setCachedPlotId(atRoomId, urlPlotId);
+            } else if (urlPlotId !== lastPlotId) {
+                // 이미 알고 있는 plotId와 다르면 (다른 방/다른 plot에서 온 응답) 무시.
+                return;
+            }
 
             const data = JSON.parse(text);
             const list = data && data.userChatProfiles;
