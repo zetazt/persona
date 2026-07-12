@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Zeta Persona Quick Editor
 // @namespace    zeta-persona-editor
-// @version      2.2.2
-// @description  현재 방의 유저 페르소나(+추천 프로필) / {{char}} 상세 / 로어북을 자동으로 불러와서, 페이지 이동 없이 바로 수정/자동저장하는 미니 에디터
+// @version      2.2.4
+// @description  현재 방의 유저 페르소나(+추천 프로필) / {{char}} 상세를 자동으로 불러와서, 페이지 이동 없이 바로 수정/자동저장하는 미니 에디터
 // @match        https://zeta-ai.io/*
 // @match        https://*.zeta-ai.io/*
 // @run-at       document-start
@@ -19,7 +19,7 @@
     }
     window.__ZETA_PERSONA_EDITOR_RUNNING__ = true;
 
-    const VERSION = "2.2.2";
+    const VERSION = "2.2.4";
 
     const PROFILES_LIST_RE = /\/v1\/user-chat-profiles(?:\?|$)/;
     const PLOT_ROOM_RE = /\/plots\/([^/]+)\/rooms\/([^/]+)\//;
@@ -447,23 +447,41 @@
     function rebuildPersonaDropdown() {
         selectEl.innerHTML = "";
         const recTargets = getRecTargets(recRoomData);
-        recTargets.forEach(t => {
-            const opt = document.createElement("option");
-            opt.value = REC_KEY_PREFIX + t.key;
+
+        const entries = [];
+        recTargets.forEach((t, idx) => {
             const isActive = !!(recMeData && recMeData.plotChatProfileId === t.key);
-            const mark = isActive ? "🔗 " : "";
-            opt.textContent = `${mark}${t.label} (${t.get().length}자)`;
-            if (opt.value === activePersonaId) opt.selected = true;
-            selectEl.appendChild(opt);
+            entries.push({
+                value: REC_KEY_PREFIX + t.key,
+                label: `${isActive ? "🔗 " : ""}${t.label} (${t.get().length}자)`,
+                isActive,
+                order: idx
+            });
         });
-        personaList.forEach(p => {
+        personaList.forEach((p, idx) => {
+            const isActive = !!p.selected;
+            entries.push({
+                value: p.id,
+                label: `${isActive ? "🔗 " : ""}${p.name || "(이름없음)"} — ${(p.description || "").slice(0, 12)}`,
+                isActive,
+                order: recTargets.length + idx
+            });
+        });
+
+        // 연결된 것이 위로 오도록 정렬 (그룹 내부 순서는 원래 순서 유지) — 로어북과 동일한 방식
+        entries.sort((a, b) => {
+            const diff = (b.isActive ? 1 : 0) - (a.isActive ? 1 : 0);
+            return diff !== 0 ? diff : a.order - b.order;
+        });
+
+        entries.forEach(e => {
             const opt = document.createElement("option");
-            opt.value = p.id;
-            const mark = p.selected ? "🔗 " : "";
-            opt.textContent = `${mark}${p.name || "(이름없음)"} — ${(p.description || "").slice(0, 12)}`;
-            if (p.id === activePersonaId) opt.selected = true;
+            opt.value = e.value;
+            opt.textContent = e.label;
+            if (e.value === activePersonaId) opt.selected = true;
             selectEl.appendChild(opt);
         });
+
         updateStatus();
     }
 
@@ -531,7 +549,9 @@
         if (data && data.plot && data.plot.id) {
             lastPlotId = data.plot.id;
             setCachedPlotId(roomId, data.plot.id);
-            recRoomData = data; // 이미 받은 김에 추천 프로필 데이터도 같이 캐싱
+            // 방 데이터(recRoomData)는 여기서 캐싱하지 않는다 — recMeData(연결 정보)
+            // 없이 절반만 캐싱되면, 이후 refreshRecData()가 "이미 있음"으로 착각해서
+            // 건너뛰어버려 연결 표시가 계속 틀리게 남는 버그가 있었음.
             return true;
         }
         return false;
