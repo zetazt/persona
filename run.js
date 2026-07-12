@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Zeta Persona Quick Editor
 // @namespace    zeta-persona-editor
-// @version      2.2.0
-// @description  현재 방의 유저 페르소나(+추천 프로필) / {{char}} 상세 / 로어북을 자동으로 불러와서, 페이지 이동 없이 바로 수정/자동저장하는 미니 에디터
+// @version      2.2.1
+// @description  현재 방의 유저 페르소나(+추천 프로필) / {{char}} 상세를 자동으로 불러와서, 페이지 이동 없이 바로 수정/자동저장하는 미니 에디터
 // @match        https://zeta-ai.io/*
 // @match        https://*.zeta-ai.io/*
 // @run-at       document-start
@@ -19,7 +19,7 @@
     }
     window.__ZETA_PERSONA_EDITOR_RUNNING__ = true;
 
-    const VERSION = "2.2.0";
+    const VERSION = "2.2.1";
 
     const PROFILES_LIST_RE = /\/v1\/user-chat-profiles(?:\?|$)/;
     const PLOT_ROOM_RE = /\/plots\/([^/]+)\/rooms\/([^/]+)\//;
@@ -672,10 +672,21 @@
     function rebuildLorebookSelect() {
         lorebookSelectEl.innerHTML = "";
         const linkedIds = currentDraftLorebookIds();
-        myLorebooks.forEach(lb => {
+        const isLinked = (lb) => !!(linkedIds && linkedIds.includes(lb.id));
+
+        // 연결된 로어북이 위로 오도록 정렬 (그룹 내부 순서는 원래 순서 유지)
+        const sorted = myLorebooks
+            .map((lb, idx) => ({ lb, idx }))
+            .sort((a, b) => {
+                const linkDiff = (isLinked(b.lb) ? 1 : 0) - (isLinked(a.lb) ? 1 : 0);
+                return linkDiff !== 0 ? linkDiff : a.idx - b.idx;
+            })
+            .map(x => x.lb);
+
+        sorted.forEach(lb => {
             const opt = document.createElement("option");
             opt.value = lb.id;
-            const linkedMark = linkedIds && linkedIds.includes(lb.id) ? "🔗 " : "";
+            const linkedMark = isLinked(lb) ? "🔗 " : "";
             opt.textContent = `${linkedMark}${lb.title || "(제목없음)"} (${(lb.items || []).length}항목)`;
             if (lb.id === activeLorebookId) opt.selected = true;
             lorebookSelectEl.appendChild(opt);
