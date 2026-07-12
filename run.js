@@ -19,7 +19,7 @@
     }
     window.__ZETA_PERSONA_EDITOR_RUNNING__ = true;
 
-    const VERSION = "2.2.9";
+    const VERSION = "2.3.0";
 
     const PROFILES_LIST_RE = /\/v1\/user-chat-profiles(?:\?|$)/;
     const PLOT_ROOM_RE = /\/plots\/([^/]+)\/rooms\/([^/]+)\//;
@@ -44,6 +44,7 @@
     let recMeData = null;         // /rooms/{roomId}/user-plot-chat-profiles/me 응답 캐시 (유저창 실제 설명)
     let recMeFetchedForRoom = null; // 이 방에서 recMeData를 "성공적으로" 이미 한 번 가져왔는지
     let recMeFetchInFlight = false;
+    let recMeRecheckDoneForRoom = null; // 이 방에서 "지연 재확인"을 이미 예약했는지 (서버 지연 대응용)
     let myLorebooks = [];         // 내 로어북 전체 목록 (각 항목까지 포함)
     let activeLorebookId = null;
     let activeLorebookItemId = null;
@@ -628,7 +629,31 @@
         if (me !== null) {
             recMeFetchedForRoom = roomId;
         }
+        scheduleRecMeDelayedRecheck(roomId);
         return true;
+    }
+
+    // [v2.3.0] recMeData(연결된 프로필 정보) 서버 API가 방에 막 들어간 직후엔
+    // 부정확한 값(예: 기본/추천 프로필)을 돌려주다가, 몇 초 뒤 다시 물어보면
+    // 정확한 값으로 바뀌는 경우가 있는 것으로 보인다. (유저가 사이트에서 유저창을
+    // 열었다 닫으면 저절로 고쳐지는 것도 결국 이 API를 한 번 더 호출하게 만드는
+    // 것뿐이라 같은 효과.) 그래서 이 방에서 최초로 정보를 받아온 뒤, 1.5초 뒤에
+    // 자동으로 한 번 더 조용히 재확인해서 값이 바뀌었으면 스스로 고치도록 한다.
+    function scheduleRecMeDelayedRecheck(forRoom) {
+        if (recMeRecheckDoneForRoom === forRoom) return;
+        recMeRecheckDoneForRoom = forRoom;
+        setTimeout(async () => {
+            if (roomId !== forRoom || !capturedAuth) return;
+            const me = await fetchRecMeFresh();
+            if (me !== null) {
+                recMeData = me;
+                recMeFetchedForRoom = forRoom;
+                if (mode === "persona") {
+                    rebuildPersonaDropdown();
+                    updateStatus();
+                }
+            }
+        }, 1500);
     }
 
     // rebuildPersonaDropdown이 어디서 호출되든(경쟁 상태로 recMeData 없이 먼저 그려졌더라도),
@@ -1626,6 +1651,7 @@
             recRoomData = null;
             recMeData = null;
             recMeFetchedForRoom = null;
+            recMeRecheckDoneForRoom = null;
             selectEl.innerHTML = "<option>불러오는 중...</option>";
             descEl.value = "";
             updateCount();
