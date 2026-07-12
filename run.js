@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Zeta Persona Quick Editor
 // @namespace    zeta-persona-editor
-// @version      2.1.2
+// @version      2.2.0
 // @description  현재 방의 유저 페르소나(+추천 프로필) / {{char}} 상세 / 로어북을 자동으로 불러와서, 페이지 이동 없이 바로 수정/자동저장하는 미니 에디터
 // @match        https://zeta-ai.io/*
 // @match        https://*.zeta-ai.io/*
@@ -19,7 +19,7 @@
     }
     window.__ZETA_PERSONA_EDITOR_RUNNING__ = true;
 
-    const VERSION = "2.1.2";
+    const VERSION = "2.2.0";
 
     const PROFILES_LIST_RE = /\/v1\/user-chat-profiles(?:\?|$)/;
     const PLOT_ROOM_RE = /\/plots\/([^/]+)\/rooms\/([^/]+)\//;
@@ -520,6 +520,20 @@
         }
     }
 
+    // plotId를 "몰래 훔쳐보기"로만 잡으면, 그 특정 요청이 안 지나간 방에서는 영영 못 잡는다.
+    // /v1/rooms/{roomId} 응답 안에 plot.id가 직접 들어있으므로, 필요하면 능동적으로 물어봐서 확실히 잡는다.
+    async function resolvePlotIdActively() {
+        if (lastPlotId) return true;
+        const data = await fetchRoomFresh();
+        if (data && data.plot && data.plot.id) {
+            lastPlotId = data.plot.id;
+            setCachedPlotId(roomId, data.plot.id);
+            recRoomData = data; // 이미 받은 김에 추천 프로필 데이터도 같이 캐싱
+            return true;
+        }
+        return false;
+    }
+
     async function fetchRecMeFresh() {
         if (!capturedAuth) return null;
         try {
@@ -724,7 +738,7 @@
             lorebookItemNameEl.value = "";
             lorebookItemKeywordsEl.value = "";
             descEl.value = "";
-            descEl.placeholder = "새 항목 내용을 직접 입력해주세요.";
+            descEl.placeholder = "새 항목 내용을 직접 입력해주세요 (자동으로 채워지지 않아요).";
             updateCount();
             setSaveState("idle", "새 항목 (아직 저장 안 됨)"); clearErrorDetail();
             rebuildLorebookItemDropdown();
@@ -1009,6 +1023,10 @@
         panelEl.classList.toggle("open", open);
         if (open) {
             refreshRoomUI();
+            if (!lastPlotId && capturedAuth && roomId) {
+                await resolvePlotIdActively();
+                refreshRoomUI();
+            }
             if (mode === "persona" && !recRoomData && capturedAuth && roomId) {
                 const ok = await refreshRecData();
                 if (ok) {
@@ -1429,6 +1447,8 @@
     modeLorebookBtn.addEventListener("click", () => switchMode("lorebook"));
 
     el("refresh").addEventListener("click", async () => {
+        if (!lastPlotId) await resolvePlotIdActively();
+
         if (mode === "persona") {
             if (!capturedAuth || !lastPlotId) {
                 updateStatus();
