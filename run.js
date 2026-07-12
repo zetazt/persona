@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Zeta Persona Quick Editor
 // @namespace    zeta-persona-editor
-// @version      2.2.4
-// @description  현재 방의 유저 페르소나(+추천 프로필) / {{char}} 상세 / 로어북을 자동으로 불러와서, 페이지 이동 없이 바로 수정/자동저장하는 미니 에디터
+// @version      2.2.5
+// @description  현재 방의 유저 페르소나(+추천 프로필) / {{char}} 상세를 자동으로 불러와서, 페이지 이동 없이 바로 수정/자동저장하는 미니 에디터
 // @match        https://zeta-ai.io/*
 // @match        https://*.zeta-ai.io/*
 // @run-at       document-start
@@ -19,7 +19,7 @@
     }
     window.__ZETA_PERSONA_EDITOR_RUNNING__ = true;
 
-    const VERSION = "2.2.4";
+    const VERSION = "2.2.5";
 
     const PROFILES_LIST_RE = /\/v1\/user-chat-profiles(?:\?|$)/;
     const PLOT_ROOM_RE = /\/plots\/([^/]+)\/rooms\/([^/]+)\//;
@@ -152,6 +152,19 @@
                 if (sel && sel.id) loadPersonaIntoEditor(sel.id);
             }
             rebuildPersonaDropdown();
+
+            // 이 목록(personaList)은 방금 잡혔는데, 연결 정보(recRoomData/recMeData)가
+            // 아직 없는 상태로 먼저 그려졌을 수 있다 (경쟁 상태). 뒤늦게라도 받아와서
+            // 다시 그려서 🔗 표시/정렬이 스스로 맞게 고쳐지도록 한다.
+            if (!recRoomData && atRoomId === roomId && capturedAuth) {
+                refreshRecData().then(ok => {
+                    if (ok && roomId === atRoomId) {
+                        rebuildPersonaDropdown();
+                        updateStatus();
+                    }
+                });
+            }
+
             console.log("🩶 PersonaEditor: 목록 감지됨", atRoomId, list.length + "개");
         } catch { /* ignore */ }
     }
