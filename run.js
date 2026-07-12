@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Zeta Persona Quick Editor
 // @namespace    zeta-persona-editor
-// @version      2.2.7
+// @version      2.2.8
 // @description  현재 방의 유저 페르소나(+추천 프로필) / {{char}} 상세 / 로어북을 자동으로 불러와서, 페이지 이동 없이 바로 수정/자동저장하는 미니 에디터
 // @match        https://zeta-ai.io/*
 // @match        https://*.zeta-ai.io/*
@@ -19,7 +19,7 @@
     }
     window.__ZETA_PERSONA_EDITOR_RUNNING__ = true;
 
-    const VERSION = "2.2.7";
+    const VERSION = "2.2.8";
 
     const PROFILES_LIST_RE = /\/v1\/user-chat-profiles(?:\?|$)/;
     const PLOT_ROOM_RE = /\/plots\/([^/]+)\/rooms\/([^/]+)\//;
@@ -396,6 +396,14 @@
         return obj && obj.draft ? obj.draft : null;
     }
 
+    // [v2.2.8] "내 페르소나(personaList)"에서 실제로 selected:true인 게 있으면,
+    // 그게 이 방의 진짜 연결된 프로필이다. recMeData(/user-plot-chat-profiles/me)는
+    // 이 방에서 실제로 내 페르소나를 쓰고 있어도 항상 "기본 추천프로필" 값을 그대로
+    // 돌려주는 경우가 있어서, 이 값만으로 추천프로필을 연결됨으로 표시하면 안 된다.
+    function hasActiveCustomPersona() {
+        return personaList.some(p => p && p.selected);
+    }
+
     function getRecTargets(roomData) {
         const list = (roomData && roomData.plot && roomData.plot.chatProfiles) || [];
         return list.map(cp => ({
@@ -465,8 +473,10 @@
         const recTargets = getRecTargets(recRoomData);
 
         const entries = [];
+        const customActive = hasActiveCustomPersona();
         recTargets.forEach((t, idx) => {
-            const isActive = !!(recMeData && recMeData.plotChatProfileId === t.key);
+            // 내 페르소나 쪽이 선택돼 있으면 추천프로필은 절대 연결됨(🔗)으로 표시하지 않는다.
+            const isActive = !customActive && !!(recMeData && recMeData.plotChatProfileId === t.key);
             entries.push({
                 value: REC_KEY_PREFIX + t.key,
                 label: `${isActive ? "🔗 " : ""}${t.label} (${t.get().length}자)`,
@@ -1113,9 +1123,14 @@
                 if (ok) {
                     rebuildPersonaDropdown();
                     if (!tryApplySavedPersonaSelection() && !activePersonaId) {
-                        const recTargets = getRecTargets(recRoomData);
-                        if (recTargets.length) {
-                            loadPersonaIntoEditor(REC_KEY_PREFIX + recTargets[0].key);
+                        const selectedCustom = personaList.find(p => p && p.selected);
+                        if (selectedCustom) {
+                            loadPersonaIntoEditor(selectedCustom.id);
+                        } else {
+                            const recTargets = getRecTargets(recRoomData);
+                            if (recTargets.length) {
+                                loadPersonaIntoEditor(REC_KEY_PREFIX + recTargets[0].key);
+                            }
                         }
                     }
                     updateStatus();
@@ -1478,12 +1493,16 @@
                     if (activePersonaId) {
                         loadPersonaIntoEditor(activePersonaId);
                     } else {
-                        const recTargets = getRecTargets(recRoomData);
-                        if (recTargets.length) {
-                            loadPersonaIntoEditor(REC_KEY_PREFIX + recTargets[0].key);
+                        const selectedCustom = personaList.find(p => p && p.selected);
+                        if (selectedCustom) {
+                            loadPersonaIntoEditor(selectedCustom.id);
                         } else {
-                            const sel = personaList.find(p => p.selected) || personaList[0];
-                            if (sel) loadPersonaIntoEditor(sel.id);
+                            const recTargets = getRecTargets(recRoomData);
+                            if (recTargets.length) {
+                                loadPersonaIntoEditor(REC_KEY_PREFIX + recTargets[0].key);
+                            } else if (personaList[0]) {
+                                loadPersonaIntoEditor(personaList[0].id);
+                            }
                         }
                     }
                 }
@@ -1549,12 +1568,14 @@
             }
             await refreshRecData();
             if (!tryApplySavedPersonaSelection() && !activePersonaId) {
-                const recTargets = getRecTargets(recRoomData);
-                if (recTargets.length) {
-                    loadPersonaIntoEditor(REC_KEY_PREFIX + recTargets[0].key);
+                const selectedCustom = personaList.find(p => p && p.selected);
+                if (selectedCustom) {
+                    loadPersonaIntoEditor(selectedCustom.id);
                 } else {
-                    const sel = personaList.find(p => p.selected);
-                    if (sel) loadPersonaIntoEditor(sel.id);
+                    const recTargets = getRecTargets(recRoomData);
+                    if (recTargets.length) {
+                        loadPersonaIntoEditor(REC_KEY_PREFIX + recTargets[0].key);
+                    }
                 }
             }
             rebuildPersonaDropdown();
