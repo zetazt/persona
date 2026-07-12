@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Zeta Persona Quick Editor
 // @namespace    zeta-persona-editor
-// @version      2.0.0
-// @description  현재 방의 유저 페르소나(+추천 프로필) / {{char}} 상세를 자동으로 불러와서, 페이지 이동 없이 바로 수정/자동저장하는 미니 에디터
+// @version      2.1.0
+// @description  현재 방의 유저 페르소나(+추천 프로필) / {{char}} 상세 / 로어북을 자동으로 불러와서, 페이지 이동 없이 바로 수정/자동저장하는 미니 에디터
 // @match        https://zeta-ai.io/*
 // @match        https://*.zeta-ai.io/*
 // @run-at       document-start
@@ -19,7 +19,7 @@
     }
     window.__ZETA_PERSONA_EDITOR_RUNNING__ = true;
 
-    const VERSION = "2.0.0";
+    const VERSION = "2.1.0";
 
     const PROFILES_LIST_RE = /\/v1\/user-chat-profiles(?:\?|$)/;
     const PLOT_ROOM_RE = /\/plots\/([^/]+)\/rooms\/([^/]+)\//;
@@ -206,7 +206,7 @@
   }
   #panel.open { display: block; }
 
-  select {
+  select, input[type="text"] {
     width: 100%; background: #17181a; color: #fff;
     border: 1px solid #555; border-radius: 8px; padding: 7px 8px;
     font-size: 12px; margin-top: 6px;
@@ -272,8 +272,15 @@
   <div class="row" id="lorebook-link-row" style="display:none;">
     <button id="lorebook-link-toggle">연결 상태 확인 중...</button>
   </div>
+  <div class="row" id="lorebook-manage-row" style="display:none;">
+    <button id="lorebook-new">➕ 새 로어북</button>
+    <button id="lorebook-item-new">➕ 새 항목</button>
+  </div>
 
   <select id="target-select"><option>불러오는 중...</option></select>
+
+  <input type="text" id="lorebook-item-name" placeholder="항목 이름 (예: {{char}}, {{user}})" style="display:none;">
+  <input type="text" id="lorebook-item-keywords" placeholder="키워드 (쉼표로 구분)" style="display:none;">
 
   <textarea id="desc" placeholder="내용이 여기 자동으로 채워집니다."></textarea>
 
@@ -322,6 +329,11 @@
     const lorebookSelectEl = el("lorebook-select");
     const lorebookLinkRowEl = el("lorebook-link-row");
     const lorebookLinkToggleBtn = el("lorebook-link-toggle");
+    const lorebookManageRowEl = el("lorebook-manage-row");
+    const lorebookNewBtn = el("lorebook-new");
+    const lorebookItemNewBtn = el("lorebook-item-new");
+    const lorebookItemNameEl = el("lorebook-item-name");
+    const lorebookItemKeywordsEl = el("lorebook-item-keywords");
 
     const BTN_SIZE = 32;
     const BTN_MARGIN = 4;
@@ -673,13 +685,16 @@
         }
     }
 
+    const NEW_ITEM_KEY = "__new__";
+
     function getLorebookItems(lb) {
         if (!lb) return [];
         return (lb.items || []).map(it => ({
             key: it.id,
             label: `📄 ${it.name || "(이름없음)"}`,
-            get: () => it.content || "",
-            set: (v) => { it.content = v; }
+            name: it.name || "",
+            keywords: it.keywords || [],
+            content: it.content || ""
         }));
     }
 
@@ -689,19 +704,39 @@
         getLorebookItems(lb).forEach(t => {
             const opt = document.createElement("option");
             opt.value = t.key;
-            opt.textContent = `${t.label} (${t.get().length}자)`;
+            opt.textContent = `${t.label} (${t.content.length}자)`;
             if (t.key === activeLorebookItemId) opt.selected = true;
             selectEl.appendChild(opt);
         });
+        if (activeLorebookItemId === NEW_ITEM_KEY) {
+            const opt = document.createElement("option");
+            opt.value = NEW_ITEM_KEY;
+            opt.textContent = "✨ (새 항목 - 아직 저장 안 됨)";
+            opt.selected = true;
+            selectEl.appendChild(opt);
+        }
         updateStatus();
     }
 
     function loadLorebookItemIntoEditor(itemId) {
+        if (itemId === NEW_ITEM_KEY) {
+            activeLorebookItemId = NEW_ITEM_KEY;
+            lorebookItemNameEl.value = "";
+            lorebookItemKeywordsEl.value = "";
+            descEl.value = "";
+            updateCount();
+            setSaveState("idle", "새 항목 (아직 저장 안 됨)"); clearErrorDetail();
+            rebuildLorebookItemDropdown();
+            lorebookItemNameEl.focus();
+            return;
+        }
         const lb = myLorebooks.find(x => x.id === activeLorebookId);
         const target = getLorebookItems(lb).find(t => t.key === itemId);
         if (!target) return;
         activeLorebookItemId = itemId;
-        descEl.value = target.get();
+        lorebookItemNameEl.value = target.name;
+        lorebookItemKeywordsEl.value = target.keywords.join(", ");
+        descEl.value = target.content;
         updateCount();
         setSaveState("idle", "대기중"); clearErrorDetail();
         rebuildLorebookItemDropdown();
@@ -723,12 +758,13 @@
 
     // 로어북 저장 — GET 응답 그대로 PUT하면 안 되고, 알려진 필드만 골라서 보내야 함
     // (id/createdAt/updatedAt/creator/stats 등은 PUT에서 안 받는 읽기 전용 필드).
+    // 새 항목은 id가 없으므로 JSON.stringify가 자동으로 그 필드를 생략한다 (서버가 새로 발급해줄 것으로 기대).
     function buildLorebookPutBody(lb) {
         return {
             title: lb.title || "",
             description: lb.description || "",
             items: (lb.items || []).map(it => ({
-                id: it.id,
+                id: it.id, // 새 항목은 undefined → JSON.stringify가 자동 생략
                 name: it.name,
                 keywords: it.keywords || [],
                 content: it.content || ""
@@ -751,10 +787,13 @@
         setSaveState("saving", "저장 중...");
         clearErrorDetail();
 
-        const newText = descEl.value;
+        const isNew = activeLorebookItemId === NEW_ITEM_KEY;
+        const newName = lorebookItemNameEl.value.trim();
+        const newKeywords = lorebookItemKeywordsEl.value.split(",").map(s => s.trim()).filter(Boolean);
+        const newContent = sanitizeSurrogates(descEl.value);
+        const savedItemId = activeLorebookItemId;
 
         try {
-            // 저장 직전 서버 최신본을 다시 받아온다 (다른 항목이 그 사이 바뀌었을 수 있으므로).
             const res0 = await originalFetch(LOREBOOK_URL(activeLorebookId), {
                 headers: { "Authorization": capturedAuth }
             });
@@ -763,12 +802,20 @@
                 return;
             }
             const fresh = await res0.json();
-            const item = (fresh.items || []).find(it => it.id === activeLorebookItemId);
-            if (!item) {
-                setSaveState("error", "대상 항목을 못 찾음 ❌");
-                return;
+            if (!Array.isArray(fresh.items)) fresh.items = [];
+
+            if (isNew) {
+                fresh.items.push({ name: newName, keywords: newKeywords, content: newContent });
+            } else {
+                const item = fresh.items.find(it => it.id === savedItemId);
+                if (!item) {
+                    setSaveState("error", "대상 항목을 못 찾음 ❌");
+                    return;
+                }
+                item.name = newName;
+                item.keywords = newKeywords;
+                item.content = newContent;
             }
-            item.content = sanitizeSurrogates(newText);
 
             const bodyStr = JSON.stringify(buildLorebookPutBody(fresh));
 
@@ -782,10 +829,27 @@
             });
 
             if (res.ok) {
+                // 서버가 새 항목에 진짜 id를 발급해줬을 수 있으니 다시 받아와서 동기화한다.
+                const res2 = await originalFetch(LOREBOOK_URL(activeLorebookId), {
+                    headers: { "Authorization": capturedAuth }
+                });
+                const refreshed = res2.ok ? await res2.json() : fresh;
+
                 const idx = myLorebooks.findIndex(x => x.id === activeLorebookId);
-                if (idx !== -1) myLorebooks[idx] = fresh;
+                if (idx !== -1) myLorebooks[idx] = refreshed;
+
+                if (isNew) {
+                    // 방금 만든 항목을 이름+내용으로 최대한 찾아서 선택해준다.
+                    const match = (refreshed.items || []).find(it => it.name === newName && it.content === newContent);
+                    activeLorebookItemId = match ? match.id : null;
+                }
+
                 setSaveState("saved", "저장됨 ✅");
-                rebuildLorebookItemDropdown();
+                if (activeLorebookItemId && activeLorebookItemId !== NEW_ITEM_KEY) {
+                    loadLorebookItemIntoEditor(activeLorebookItemId);
+                } else {
+                    rebuildLorebookItemDropdown();
+                }
             } else {
                 const t = await res.text().catch(() => "");
                 setSaveState("error", `실패 ❌ (HTTP ${res.status})`);
@@ -1215,7 +1279,7 @@
         }
     }
 
-    descEl.addEventListener("input", () => {
+    function onEditableInput() {
         updateCount();
         updateStatus();
         clearErrorDetail();
@@ -1226,7 +1290,11 @@
         } else {
             setSaveState("idle", "수정됨 (저장 필요)");
         }
-    });
+    }
+
+    descEl.addEventListener("input", onEditableInput);
+    lorebookItemNameEl.addEventListener("input", onEditableInput);
+    lorebookItemKeywordsEl.addEventListener("input", onEditableInput);
 
     autosaveToggleEl.addEventListener("change", () => {
         setAutosaveEnabled(autosaveToggleEl.checked);
@@ -1271,6 +1339,53 @@
 
     lorebookLinkToggleBtn.addEventListener("click", doToggleLorebookLink);
 
+    lorebookItemNewBtn.addEventListener("click", () => {
+        if (!activeLorebookId) {
+            alert("먼저 로어북을 하나 선택해주세요.");
+            return;
+        }
+        const hasUnsaved = saveStateEl.textContent.includes("저장 필요") || saveStateEl.textContent.includes("입력 중");
+        if (hasUnsaved && !confirm("저장 안 된 수정사항이 있어요. 그냥 새 항목을 만들까요? (지금 내용은 사라져요)")) {
+            return;
+        }
+        loadLorebookItemIntoEditor(NEW_ITEM_KEY);
+    });
+
+    lorebookNewBtn.addEventListener("click", async () => {
+        const title = prompt("새 로어북 제목을 입력해주세요:");
+        if (!title || !title.trim()) return;
+        if (!capturedAuth) {
+            alert("아직 인증 토큰을 못 잡았어요. 사이트를 조작해본 뒤 다시 시도해주세요.");
+            return;
+        }
+        try {
+            const res = await originalFetch("https://api.zeta-ai.io/v1/lorebooks", {
+                method: "POST",
+                headers: {
+                    "Content-Type": "application/json",
+                    "Authorization": capturedAuth
+                },
+                body: JSON.stringify({ title: title.trim(), description: "", items: [], isSharingEnabled: false })
+            });
+            if (res.ok) {
+                const created = await res.json();
+                myLorebooks.push(created);
+                loadLorebookIntoEditor(created.id);
+                flashOK("새 로어북 생성됨 ✅");
+            } else {
+                const t = await res.text().catch(() => "");
+                alert(`새 로어북 생성 실패 (HTTP ${res.status})\n${t}`);
+                console.error("🩶 PersonaEditor(lorebook) 생성 실패:", res.status, t);
+            }
+        } catch (err) {
+            alert("네트워크 오류: " + String(err && err.message));
+        }
+    });
+
+    function flashOK(text) {
+        setSaveState("saved", text);
+    }
+
     async function switchMode(newMode) {
         if (mode === newMode) return;
         mode = newMode;
@@ -1279,6 +1394,9 @@
         modeLorebookBtn.classList.toggle("active", mode === "lorebook");
         lorebookSelectEl.style.display = mode === "lorebook" ? "" : "none";
         lorebookLinkRowEl.style.display = mode === "lorebook" ? "" : "none";
+        lorebookManageRowEl.style.display = mode === "lorebook" ? "" : "none";
+        lorebookItemNameEl.style.display = mode === "lorebook" ? "" : "none";
+        lorebookItemKeywordsEl.style.display = mode === "lorebook" ? "" : "none";
         clearTimeout(saveDebounce);
 
         if (mode === "persona") {
