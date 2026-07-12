@@ -19,7 +19,7 @@
     }
     window.__ZETA_PERSONA_EDITOR_RUNNING__ = true;
 
-    const VERSION = "2.3.1";
+    const VERSION = "2.4.0";
 
     const PROFILES_LIST_RE = /\/v1\/user-chat-profiles(?:\?|$)/;
     const PLOT_ROOM_RE = /\/plots\/([^/]+)\/rooms\/([^/]+)\//;
@@ -101,6 +101,25 @@
 
     function saveSavedPersonaSelection(id, key) {
         if (key) localStorage.setItem(personaSelectionKey(id), key);
+    }
+
+    // [v2.4.0] 서버가 주는 selected/recMeData 값이 이 방에서는 못 믿을 때가 있어서,
+    // 유저가 직접 "이게 진짜 연결된 프로필이다"라고 방마다 고정(핀)할 수 있게 한다.
+    // 핀이 있으면 자동 감지(서버 selected/recMeData) 결과를 무시하고 핀을 최우선으로 쓴다.
+    function personaPinKey(id) {
+        return `zeta-persona-editor-pin-${id}`;
+    }
+
+    function getPinnedPersona(id) {
+        return localStorage.getItem(personaPinKey(id));
+    }
+
+    function setPinnedPersona(id, key) {
+        if (key) localStorage.setItem(personaPinKey(id), key);
+    }
+
+    function clearPinnedPersona(id) {
+        localStorage.removeItem(personaPinKey(id));
     }
 
     let capturedAuth = null;
@@ -313,6 +332,10 @@
 
   <select id="target-select"><option>불러오는 중...</option></select>
 
+  <div class="row" id="persona-pin-row" style="display:none;">
+    <button id="persona-pin-btn">📌 이 항목을 연결됨으로 고정</button>
+  </div>
+
   <input type="text" id="lorebook-item-name" placeholder="항목 이름 (예: {{char}}, {{user}})" style="display:none;">
   <input type="text" id="lorebook-item-keywords" placeholder="키워드 (쉼표로 구분)" style="display:none;">
 
@@ -367,6 +390,8 @@
     const lorebookItemNewBtn = el("lorebook-item-new");
     const lorebookItemNameEl = el("lorebook-item-name");
     const lorebookItemKeywordsEl = el("lorebook-item-keywords");
+    const personaPinRowEl = el("persona-pin-row");
+    const personaPinBtn = el("persona-pin-btn");
 
     const BTN_SIZE = 32;
     const BTN_MARGIN = 4;
@@ -491,26 +516,24 @@
         selectEl.innerHTML = "";
         ensureRecMeData(); // 아직 연결 정보를 못 가져왔으면 백그라운드로 시도 (끝나면 알아서 다시 그림)
         const recTargets = getRecTargets(recRoomData);
+        const pinned = getPinnedPersona(roomId);
 
         const entries = [];
         const customActive = hasActiveCustomPersona();
         recTargets.forEach((t, idx) => {
-            // 내 페르소나 쪽이 선택돼 있으면 추천프로필은 절대 연결됨(🔗)으로 표시하지 않는다.
-            // [v2.3.1] recMeData.plotChatProfileId가 있다고 무조건 연결된 게 아니다 —
-            // 그 기록이 "이 방에서 한 번이라도 커스터마이징된 적 있는 프로필"이라는 뜻일 뿐일 수 있고,
-            // 진짜 지금 활성화된 건지는 recMeData.selected 필드로 확인해야 한다.
-            // (selected:false인데 plotChatProfileId만 남아있는 경우가 실제로 확인됨 → 이게 기본
-            // 프로필에 엉뚱하게 🔗가 붙던 원인.)
-            const isActive = !customActive && !!(recMeData && recMeData.plotChatProfileId === t.key && recMeData.selected);
+            const value = REC_KEY_PREFIX + t.key;
+            // [v2.4.0] 고정(핀)이 있으면 서버 값(recMeData) 대신 핀을 최우선으로 따른다.
+            const isActive = pinned ? (pinned === value) : (!customActive && !!(recMeData && recMeData.plotChatProfileId === t.key && recMeData.selected));
             entries.push({
-                value: REC_KEY_PREFIX + t.key,
+                value,
                 label: `${isActive ? "🔗 " : ""}${t.label} (${t.get().length}자)`,
                 isActive,
                 order: idx
             });
         });
         personaList.forEach((p, idx) => {
-            const isActive = !!p.selected;
+            // [v2.4.0] 고정(핀)이 있으면 서버 값(p.selected) 대신 핀을 최우선으로 따른다.
+            const isActive = pinned ? (pinned === p.id) : !!p.selected;
             entries.push({
                 value: p.id,
                 label: `${isActive ? "🔗 " : ""}${p.name || "(이름없음)"} — ${(p.description || "").slice(0, 12)}`,
@@ -533,7 +556,24 @@
             selectEl.appendChild(opt);
         });
 
+        updatePersonaPinButton();
         updateStatus();
+    }
+
+    // [v2.4.0] 지금 선택된 항목이 이미 이 방의 고정값인지에 따라 버튼 문구를 바꾼다.
+    function updatePersonaPinButton() {
+        if (!activePersonaId) {
+            personaPinBtn.textContent = "📌 이 항목을 연결됨으로 고정";
+            personaPinBtn.disabled = true;
+            return;
+        }
+        personaPinBtn.disabled = false;
+        const pinned = getPinnedPersona(roomId);
+        if (pinned === activePersonaId) {
+            personaPinBtn.textContent = "📌 고정됨 (해제하기)";
+        } else {
+            personaPinBtn.textContent = "📌 이 항목을 연결됨으로 고정";
+        }
     }
 
     let userPickedManually = false;
@@ -1092,6 +1132,7 @@
     }
 
     autosaveToggleEl.checked = getAutosaveEnabled();
+    personaPinRowEl.style.display = ""; // 기본 모드가 persona라서 처음부터 보이게
     refreshRoomUI();
 
     let dragging = false;
@@ -1506,6 +1547,17 @@
 
     lorebookLinkToggleBtn.addEventListener("click", doToggleLorebookLink);
 
+    personaPinBtn.addEventListener("click", () => {
+        if (!activePersonaId) return;
+        const pinned = getPinnedPersona(roomId);
+        if (pinned === activePersonaId) {
+            clearPinnedPersona(roomId);
+        } else {
+            setPinnedPersona(roomId, activePersonaId);
+        }
+        rebuildPersonaDropdown();
+    });
+
     lorebookItemNewBtn.addEventListener("click", () => {
         if (!activeLorebookId) {
             alert("먼저 로어북을 하나 선택해주세요.");
@@ -1529,6 +1581,7 @@
         lorebookManageRowEl.style.display = mode === "lorebook" ? "" : "none";
         lorebookItemNameEl.style.display = mode === "lorebook" ? "" : "none";
         lorebookItemKeywordsEl.style.display = mode === "lorebook" ? "" : "none";
+        personaPinRowEl.style.display = mode === "persona" ? "" : "none";
         if (mode !== "lorebook") descEl.placeholder = DEFAULT_DESC_PLACEHOLDER;
         clearTimeout(saveDebounce);
 
