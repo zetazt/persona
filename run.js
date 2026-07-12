@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Zeta Persona Quick Editor
 // @namespace    zeta-persona-editor
-// @version      2.1.0
-// @description  현재 방의 유저 페르소나(+추천 프로필) / {{char}} 상세 / 로어북을 자동으로 불러와서, 페이지 이동 없이 바로 수정/자동저장하는 미니 에디터
+// @version      2.1.1
+// @description  현재 방의 유저 페르소나(+추천 프로필) / {{char}} 상세를 자동으로 불러와서, 페이지 이동 없이 바로 수정/자동저장하는 미니 에디터
 // @match        https://zeta-ai.io/*
 // @match        https://*.zeta-ai.io/*
 // @run-at       document-start
@@ -19,7 +19,7 @@
     }
     window.__ZETA_PERSONA_EDITOR_RUNNING__ = true;
 
-    const VERSION = "2.1.0";
+    const VERSION = "2.1.1";
 
     const PROFILES_LIST_RE = /\/v1\/user-chat-profiles(?:\?|$)/;
     const PLOT_ROOM_RE = /\/plots\/([^/]+)\/rooms\/([^/]+)\//;
@@ -273,7 +273,6 @@
     <button id="lorebook-link-toggle">연결 상태 확인 중...</button>
   </div>
   <div class="row" id="lorebook-manage-row" style="display:none;">
-    <button id="lorebook-new">➕ 새 로어북</button>
     <button id="lorebook-item-new">➕ 새 항목</button>
   </div>
 
@@ -330,7 +329,6 @@
     const lorebookLinkRowEl = el("lorebook-link-row");
     const lorebookLinkToggleBtn = el("lorebook-link-toggle");
     const lorebookManageRowEl = el("lorebook-manage-row");
-    const lorebookNewBtn = el("lorebook-new");
     const lorebookItemNewBtn = el("lorebook-item-new");
     const lorebookItemNameEl = el("lorebook-item-name");
     const lorebookItemKeywordsEl = el("lorebook-item-keywords");
@@ -1350,41 +1348,6 @@
         }
         loadLorebookItemIntoEditor(NEW_ITEM_KEY);
     });
-
-    lorebookNewBtn.addEventListener("click", async () => {
-        const title = prompt("새 로어북 제목을 입력해주세요:");
-        if (!title || !title.trim()) return;
-        if (!capturedAuth) {
-            alert("아직 인증 토큰을 못 잡았어요. 사이트를 조작해본 뒤 다시 시도해주세요.");
-            return;
-        }
-        try {
-            const res = await originalFetch("https://api.zeta-ai.io/v1/lorebooks", {
-                method: "POST",
-                headers: {
-                    "Content-Type": "application/json",
-                    "Authorization": capturedAuth
-                },
-                body: JSON.stringify({ title: title.trim(), description: "", items: [], isSharingEnabled: false })
-            });
-            if (res.ok) {
-                const created = await res.json();
-                myLorebooks.push(created);
-                loadLorebookIntoEditor(created.id);
-                flashOK("새 로어북 생성됨 ✅");
-            } else {
-                const t = await res.text().catch(() => "");
-                alert(`새 로어북 생성 실패 (HTTP ${res.status})\n${t}`);
-                console.error("🩶 PersonaEditor(lorebook) 생성 실패:", res.status, t);
-            }
-        } catch (err) {
-            alert("네트워크 오류: " + String(err && err.message));
-        }
-    });
-
-    function flashOK(text) {
-        setSaveState("saved", text);
-    }
 
     async function switchMode(newMode) {
         if (mode === newMode) return;
