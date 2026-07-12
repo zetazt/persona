@@ -397,11 +397,35 @@
     const BTN_MARGIN = 4;
 
     function applyPos(pos) {
-        btnEl.style.left = pos.left + "px";
-        btnEl.style.bottom = pos.bottom + "px";
+    btnEl.style.left = pos.left + "px";
+    btnEl.style.bottom = pos.bottom + "px";
+
+    // 버튼이 화면 아래쪽 절반에 있으면 → 패널은 위로 열림 (기존 방식)
+    // 버튼이 화면 위쪽 절반에 있으면 → 패널은 아래로 열림
+    const isNearBottom = pos.bottom < window.innerHeight / 2;
+
+    // 버튼이 화면 왼쪽 절반에 있으면 → 패널은 오른쪽으로 열림 (기존 방식)
+    // 버튼이 화면 오른쪽 절반에 있으면 → 패널은 왼쪽으로 열림
+    const isNearRight = pos.left > window.innerWidth / 2;
+
+    // 매번 초기화 (이전 방향의 스타일이 남아있지 않도록)
+    panelEl.style.left = "";
+    panelEl.style.right = "";
+    panelEl.style.top = "";
+    panelEl.style.bottom = "";
+
+    if (isNearRight) {
+        panelEl.style.right = (window.innerWidth - pos.left - BTN_SIZE) + "px";
+    } else {
         panelEl.style.left = pos.left + "px";
-        panelEl.style.bottom = (pos.bottom + BTN_SIZE + 10) + "px";
     }
+
+    if (isNearBottom) {
+        panelEl.style.bottom = (pos.bottom + BTN_SIZE + 10) + "px";
+    } else {
+        panelEl.style.top = (window.innerHeight - pos.bottom + 10) + "px";
+    }
+}
 
     applyPos(getPos());
 
