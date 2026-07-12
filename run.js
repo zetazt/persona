@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Zeta Persona Quick Editor
 // @namespace    zeta-persona-editor
-// @version      2.2.6
+// @version      2.2.7
 // @description  현재 방의 유저 페르소나(+추천 프로필) / {{char}} 상세 / 로어북을 자동으로 불러와서, 페이지 이동 없이 바로 수정/자동저장하는 미니 에디터
 // @match        https://zeta-ai.io/*
 // @match        https://*.zeta-ai.io/*
@@ -19,7 +19,7 @@
     }
     window.__ZETA_PERSONA_EDITOR_RUNNING__ = true;
 
-    const VERSION = "2.2.6";
+    const VERSION = "2.2.7";
 
     const PROFILES_LIST_RE = /\/v1\/user-chat-profiles(?:\?|$)/;
     const PLOT_ROOM_RE = /\/plots\/([^/]+)\/rooms\/([^/]+)\//;
@@ -42,7 +42,7 @@
     let activePlotTargetKey = null;
     let recRoomData = null;       // /rooms/{roomId} 전체 응답 캐시 (추천 프로필 목록/이름/이미지용)
     let recMeData = null;         // /rooms/{roomId}/user-plot-chat-profiles/me 응답 캐시 (유저창 실제 설명)
-    let recMeFetchedForRoom = null; // 이 방에서 recMeData를 (성공/실패 여부와 무관하게) 이미 한 번 시도했는지
+    let recMeFetchedForRoom = null; // 이 방에서 recMeData를 "성공적으로" 이미 한 번 가져왔는지
     let recMeFetchInFlight = false;
     let myLorebooks = [];         // 내 로어북 전체 목록 (각 항목까지 포함)
     let activeLorebookId = null;
@@ -586,18 +586,27 @@
         }
     }
 
+    // [수정: v2.2.7] fetchRecMeFresh()가 실패(null)해도 "이미 가져왔음"으로 확정짓지 않는다.
+    // 예전에는 recMeFetchedForRoom을 무조건 roomId로 찍어버려서, 방 진입 직후 이 특정
+    // 엔드포인트만 일시적으로 실패하는 경우 연결(🔗) 정보가 영영 다시 시도되지 않고
+    // null로 굳어버리는 문제가 있었다. 그래서 유저가 사이트 자체 UI(유저프로필 열고 닫기)를
+    // 건드려 다른 경로로 재요청이 발생해야만 그제서야 반영되는 것처럼 보였던 것.
     async function refreshRecData() {
         const [fresh, me] = await Promise.all([fetchRoomFresh(), fetchRecMeFresh()]);
         if (!fresh || !fresh.plot) return false;
         recRoomData = fresh;
         recMeData = me;
-        recMeFetchedForRoom = roomId;
+        if (me !== null) {
+            recMeFetchedForRoom = roomId;
+        }
         return true;
     }
 
     // rebuildPersonaDropdown이 어디서 호출되든(경쟁 상태로 recMeData 없이 먼저 그려졌더라도),
-    // 이 방에서 아직 한 번도 recMeData를 안 가져왔으면 백그라운드로 가져와서 다시 그린다.
+    // 이 방에서 아직 "성공적으로" recMeData를 못 가져왔으면 백그라운드로 가져와서 다시 그린다.
     // (fire-and-forget: await 안 하고 그냥 던져둠 — 끝나면 스스로 재렌더링됨)
+    // [수정: v2.2.7] 실패(me === null)했을 때는 recMeFetchedForRoom을 확정하지 않아서
+    // 패널을 다시 열거나 재렌더링될 때마다 자동으로 재시도되도록 함.
     function ensureRecMeData() {
         if (recMeFetchedForRoom === roomId || recMeFetchInFlight || !capturedAuth || !roomId) return;
         recMeFetchInFlight = true;
@@ -605,8 +614,10 @@
         fetchRecMeFresh().then(me => {
             recMeFetchInFlight = false;
             if (forRoom !== roomId) return; // 그 사이 방이 바뀌었으면 무시
-            recMeFetchedForRoom = forRoom;
-            recMeData = me;
+            if (me !== null) {
+                recMeFetchedForRoom = forRoom;
+                recMeData = me;
+            }
             if (mode === "persona") {
                 rebuildPersonaDropdown();
                 updateStatus();
