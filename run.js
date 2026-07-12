@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Zeta Persona Quick Editor
 // @namespace    zeta-persona-editor
-// @version      2.2.5
-// @description  현재 방의 유저 페르소나(+추천 프로필) / {{char}} 상세 / 로어북을 자동으로 불러와서, 페이지 이동 없이 바로 수정/자동저장하는 미니 에디터
+// @version      2.2.6
+// @description  현재 방의 유저 페르소나(+추천 프로필) / {{char}} 상세를 자동으로 불러와서, 페이지 이동 없이 바로 수정/자동저장하는 미니 에디터
 // @match        https://zeta-ai.io/*
 // @match        https://*.zeta-ai.io/*
 // @run-at       document-start
@@ -19,7 +19,7 @@
     }
     window.__ZETA_PERSONA_EDITOR_RUNNING__ = true;
 
-    const VERSION = "2.2.5";
+    const VERSION = "2.2.6";
 
     const PROFILES_LIST_RE = /\/v1\/user-chat-profiles(?:\?|$)/;
     const PLOT_ROOM_RE = /\/plots\/([^/]+)\/rooms\/([^/]+)\//;
@@ -42,6 +42,8 @@
     let activePlotTargetKey = null;
     let recRoomData = null;       // /rooms/{roomId} 전체 응답 캐시 (추천 프로필 목록/이름/이미지용)
     let recMeData = null;         // /rooms/{roomId}/user-plot-chat-profiles/me 응답 캐시 (유저창 실제 설명)
+    let recMeFetchedForRoom = null; // 이 방에서 recMeData를 (성공/실패 여부와 무관하게) 이미 한 번 시도했는지
+    let recMeFetchInFlight = false;
     let myLorebooks = [];         // 내 로어북 전체 목록 (각 항목까지 포함)
     let activeLorebookId = null;
     let activeLorebookItemId = null;
@@ -459,6 +461,7 @@
 
     function rebuildPersonaDropdown() {
         selectEl.innerHTML = "";
+        ensureRecMeData(); // 아직 연결 정보를 못 가져왔으면 백그라운드로 시도 (끝나면 알아서 다시 그림)
         const recTargets = getRecTargets(recRoomData);
 
         const entries = [];
@@ -588,7 +591,27 @@
         if (!fresh || !fresh.plot) return false;
         recRoomData = fresh;
         recMeData = me;
+        recMeFetchedForRoom = roomId;
         return true;
+    }
+
+    // rebuildPersonaDropdown이 어디서 호출되든(경쟁 상태로 recMeData 없이 먼저 그려졌더라도),
+    // 이 방에서 아직 한 번도 recMeData를 안 가져왔으면 백그라운드로 가져와서 다시 그린다.
+    // (fire-and-forget: await 안 하고 그냥 던져둠 — 끝나면 스스로 재렌더링됨)
+    function ensureRecMeData() {
+        if (recMeFetchedForRoom === roomId || recMeFetchInFlight || !capturedAuth || !roomId) return;
+        recMeFetchInFlight = true;
+        const forRoom = roomId;
+        fetchRecMeFresh().then(me => {
+            recMeFetchInFlight = false;
+            if (forRoom !== roomId) return; // 그 사이 방이 바뀌었으면 무시
+            recMeFetchedForRoom = forRoom;
+            recMeData = me;
+            if (mode === "persona") {
+                rebuildPersonaDropdown();
+                updateStatus();
+            }
+        });
     }
 
     function getPlotTargets(draft) {
@@ -1551,6 +1574,7 @@
             activePlotTargetKey = null;
             recRoomData = null;
             recMeData = null;
+            recMeFetchedForRoom = null;
             selectEl.innerHTML = "<option>불러오는 중...</option>";
             descEl.value = "";
             updateCount();
