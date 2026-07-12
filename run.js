@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Zeta Persona Quick Editor
 // @namespace    zeta-persona-editor
-// @version      2.1.1
-// @description  현재 방의 유저 페르소나(+추천 프로필) / {{char}} 상세를 자동으로 불러와서, 페이지 이동 없이 바로 수정/자동저장하는 미니 에디터
+// @version      2.1.2
+// @description  현재 방의 유저 페르소나(+추천 프로필) / {{char}} 상세 / 로어북을 자동으로 불러와서, 페이지 이동 없이 바로 수정/자동저장하는 미니 에디터
 // @match        https://zeta-ai.io/*
 // @match        https://*.zeta-ai.io/*
 // @run-at       document-start
@@ -19,7 +19,7 @@
     }
     window.__ZETA_PERSONA_EDITOR_RUNNING__ = true;
 
-    const VERSION = "2.1.1";
+    const VERSION = "2.1.2";
 
     const PROFILES_LIST_RE = /\/v1\/user-chat-profiles(?:\?|$)/;
     const PLOT_ROOM_RE = /\/plots\/([^/]+)\/rooms\/([^/]+)\//;
@@ -716,18 +716,22 @@
         updateStatus();
     }
 
+    const DEFAULT_DESC_PLACEHOLDER = "내용이 여기 자동으로 채워집니다.";
+
     function loadLorebookItemIntoEditor(itemId) {
         if (itemId === NEW_ITEM_KEY) {
             activeLorebookItemId = NEW_ITEM_KEY;
             lorebookItemNameEl.value = "";
             lorebookItemKeywordsEl.value = "";
             descEl.value = "";
+            descEl.placeholder = "새 항목 내용을 직접 입력해주세요.";
             updateCount();
             setSaveState("idle", "새 항목 (아직 저장 안 됨)"); clearErrorDetail();
             rebuildLorebookItemDropdown();
             lorebookItemNameEl.focus();
             return;
         }
+        descEl.placeholder = DEFAULT_DESC_PLACEHOLDER;
         const lb = myLorebooks.find(x => x.id === activeLorebookId);
         const target = getLorebookItems(lb).find(t => t.key === itemId);
         if (!target) return;
@@ -842,12 +846,14 @@
                     activeLorebookItemId = match ? match.id : null;
                 }
 
-                setSaveState("saved", "저장됨 ✅");
+                // loadLorebookItemIntoEditor는 내부에서 상태를 "대기중"으로 되돌리므로,
+                // 반드시 그 다음에 "저장됨"을 표시해야 화면에 제대로 남는다.
                 if (activeLorebookItemId && activeLorebookItemId !== NEW_ITEM_KEY) {
                     loadLorebookItemIntoEditor(activeLorebookItemId);
                 } else {
                     rebuildLorebookItemDropdown();
                 }
+                setSaveState("saved", "저장됨 ✅");
             } else {
                 const t = await res.text().catch(() => "");
                 setSaveState("error", `실패 ❌ (HTTP ${res.status})`);
@@ -1360,6 +1366,7 @@
         lorebookManageRowEl.style.display = mode === "lorebook" ? "" : "none";
         lorebookItemNameEl.style.display = mode === "lorebook" ? "" : "none";
         lorebookItemKeywordsEl.style.display = mode === "lorebook" ? "" : "none";
+        if (mode !== "lorebook") descEl.placeholder = DEFAULT_DESC_PLACEHOLDER;
         clearTimeout(saveDebounce);
 
         if (mode === "persona") {
