@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Zeta Persona Quick Editor
 // @namespace    zeta-persona-editor
-// @version      2.5.0
+// @version      2.6.0
 // @description  현재 방의 유저 페르소나(+추천 프로필) / {{char}} 상세 / 로어북을 자동으로 불러와서, 페이지 이동 없이 바로 수정/자동저장하는 미니 에디터
 // @match        https://zeta-ai.io/*
 // @match        https://*.zeta-ai.io/*
@@ -19,7 +19,7 @@
     }
     window.__ZETA_PERSONA_EDITOR_RUNNING__ = true;
 
-    const VERSION = "2.5.0";
+    const VERSION = "2.6.0";
 
     // [v2.5.0] 페르소나/추천프로필 칸을 "이름 붙인 여러 탭"으로 나눠서 편집할 수 있게 하는 기능.
     // 제타 서버는 여전히 하나의 이어붙은 텍스트만 저장하므로(엔터로만 구분), 탭 구조 자체는
@@ -513,7 +513,7 @@
         // [v2.5.0] 탭이 여러 개로 나뉘어 있으면, 실제 저장되는 값은 모든 탭을 합친 길이이므로
         // "지금 보는 탭 길이"와 "전체 합계 길이"를 같이 보여준다.
         let totalLen = len;
-        if (mode === "persona" && sectionsState && isMultiSection()) {
+        if (sectionsActive() && isMultiSection()) {
             totalLen = sectionsState.sections.reduce((sum, s, idx) => {
                 return sum + (idx === sectionsState.activeIndex ? len : (s.content || "").length);
             }, 0);
@@ -690,19 +690,43 @@
     let userPickedManually = false;
 
     //------------------------------------------
-    // [v2.5.0] 페르소나 칸 나누기(탭) 기능
+    // [v2.5.0 → v2.6.0] 칸 나누기(탭) 기능
+    // 처음엔 {{user}}(페르소나/추천프로필)에만 있었는데, {{char}} 쪽의 기본설정/
+    // 내레이터/캐릭터별 설명 각각에도 똑같이 쓸 수 있게 확장했다.
     //------------------------------------------
 
-    // 커스텀 페르소나(id)는 방과 무관한 전역 프로필이라 id만으로 키를 잡고,
-    // 추천프로필("rec:xxx")은 방마다 실제 내용이 다를 수 있어 방 id까지 같이 키에 넣는다.
-    function sectionsStorageKeyFor(key) {
-        if (isRecKey(key)) return `zeta-persona-editor-sections::${roomId}::${key}`;
-        return `zeta-persona-editor-sections::${key}`;
+    // 지금 모드에서 "탭을 나눌 수 있는 대상"이 뭔지 하나의 키로 정리.
+    // - persona 모드: 선택된 페르소나/추천프로필 id
+    // - plot 모드: 선택된 {{char}} 필드(longDescription / narrator / char:xxx)
+    // - 그 외 모드(로어북): 대상 없음(null) → 탭 UI 자체가 숨겨짐
+    function currentSectionTargetKey() {
+        if (mode === "persona") return activePersonaId;
+        if (mode === "plot") return activePlotTargetKey;
+        return null;
     }
 
-    function loadStoredSections(key, rawContent) {
+    // sectionsState가 지금 화면에 떠 있는 대상과 실제로 일치하는지 확인.
+    // (모드를 왔다갔다 하는 사이 어긋난 상태로 탭 UI가 잘못 그려지는 걸 막기 위함)
+    function sectionsActive() {
+        const k = currentSectionTargetKey();
+        return !!k && !!sectionsState && sectionsState.key === k;
+    }
+
+    // 커스텀 페르소나(id)는 방과 무관한 전역 프로필이라 id만으로 저장키를 잡고,
+    // 추천프로필("rec:xxx")은 방마다 실제 내용이 다를 수 있어 방 id까지 같이 넣는다.
+    function personaSectionStorageKey(key) {
+        if (isRecKey(key)) return `zeta-persona-editor-sections::rec::${roomId}::${key}`;
+        return `zeta-persona-editor-sections::persona::${key}`;
+    }
+
+    // {{char}} 필드는 plot(캐릭터) 단위로 전역이라 plotId + 필드 키로 저장키를 잡는다.
+    function plotSectionStorageKey(targetKey) {
+        return `zeta-persona-editor-sections::plot::${lastPlotId}::${targetKey}`;
+    }
+
+    function loadStoredSections(storageKey, rawContent) {
         try {
-            const raw = localStorage.getItem(sectionsStorageKeyFor(key));
+            const raw = localStorage.getItem(storageKey);
             if (!raw) return null;
             const parsed = JSON.parse(raw);
             if (!parsed || !Array.isArray(parsed.sections) || !parsed.sections.length) return null;
@@ -716,14 +740,14 @@
         }
     }
 
-    function persistSections(key, sections) {
+    function persistSections(storageKey, sections) {
         try {
-            localStorage.setItem(sectionsStorageKeyFor(key), JSON.stringify({ sections }));
+            localStorage.setItem(storageKey, JSON.stringify({ sections }));
         } catch { /* 저장 용량 초과 등은 조용히 무시 (탭 기억만 안 될 뿐 편집 자체는 계속 됨) */ }
     }
 
-    function clearStoredSections(key) {
-        try { localStorage.removeItem(sectionsStorageKeyFor(key)); } catch { /* ignore */ }
+    function clearStoredSections(storageKey) {
+        try { localStorage.removeItem(storageKey); } catch { /* ignore */ }
     }
 
     function combinedSectionsText(sections) {
@@ -738,21 +762,21 @@
         return !!(sectionsState && sectionsState.sections.length > 1);
     }
 
-    // 페르소나를 (다시) 불러올 때 호출. 같은 대상(key)을 다시 불러오는 거면
-    // (예: 모드를 잠깐 벗어났다 돌아옴) 메모리에 있던 탭 상태를 그대로 유지하고
-    // textarea만 활성 탭 내용으로 다시 맞춰준다. 대상이 바뀌면 저장된 탭 구조를
-    // 불러오거나, 없으면 통짜 내용 하나짜리("전체") 탭으로 새로 시작한다.
-    function initSectionsAfterLoad(key, rawContent) {
-        if (sectionsState && sectionsState.key === key) {
+    // 대상(페르소나 또는 {{char}} 필드)을 (다시) 불러올 때 호출. 같은 대상(key)을
+    // 다시 불러오는 거면(예: 모드를 잠깐 벗어났다 돌아옴) 메모리에 있던 탭 상태를
+    // 그대로 유지하고 textarea만 활성 탭 내용으로 다시 맞춰준다. 대상이 바뀌면
+    // 저장된 탭 구조를 불러오거나, 없으면 통짜 내용 하나짜리("전체") 탭으로 새로 시작한다.
+    function initSectionsAfterLoad(key, rawContent, storageKey) {
+        if (sectionsState && sectionsState.key === key && sectionsState.storageKey === storageKey) {
             descEl.value = sectionsState.sections[sectionsState.activeIndex].content;
             renderSectionUI();
             return;
         }
-        const stored = loadStoredSections(key, rawContent);
+        const stored = loadStoredSections(storageKey, rawContent);
         if (stored) {
-            sectionsState = { key, sections: stored, activeIndex: 0 };
+            sectionsState = { key, storageKey, sections: stored, activeIndex: 0 };
         } else {
-            sectionsState = { key, sections: [{ id: newSectionId(), name: "전체", content: rawContent }], activeIndex: 0 };
+            sectionsState = { key, storageKey, sections: [{ id: newSectionId(), name: "전체", content: rawContent }], activeIndex: 0 };
         }
         descEl.value = sectionsState.sections[sectionsState.activeIndex].content;
         renderSectionUI();
@@ -776,7 +800,7 @@
     }
 
     function renderSectionUI() {
-        const active = mode === "persona" && !!sectionsState;
+        const active = sectionsActive();
         if (!active) {
             sectionAddRowEl.style.display = "none";
             sectionTabsRowEl.style.display = "none";
@@ -819,7 +843,8 @@
         syncActiveSectionFromEditor();
         // 아직 한 칸(미분리) 상태였다면, 지금 내용에 먼저 이름을 붙여준다.
         if (sectionsState.sections.length === 1) {
-            const firstName = prompt("지금 내용을 담을 첫 번째 탭 이름을 지어주세요.\n(예: 고정설정)", sectionsState.sections[0].name === "전체" ? "고정설정" : sectionsState.sections[0].name);
+            const suggested = mode === "plot" ? "기본설정" : "고정설정";
+            const firstName = prompt("지금 내용을 담을 첫 번째 탭 이름을 지어주세요.\n(예: " + suggested + ")", sectionsState.sections[0].name === "전체" ? suggested : sectionsState.sections[0].name);
             if (firstName === null) return; // 취소하면 나누기 자체를 취소
             sectionsState.sections[0].name = firstName.trim() || "탭 1";
         }
@@ -830,7 +855,7 @@
         descEl.value = "";
         updateCount();
         setSaveState("idle", "수정됨 (저장 필요)"); clearErrorDetail();
-        persistSections(sectionsState.key, sectionsState.sections);
+        persistSections(sectionsState.storageKey, sectionsState.sections);
         renderSectionUI();
     }
 
@@ -841,7 +866,7 @@
         const name = prompt("탭 이름 바꾸기", s.name);
         if (name === null) return;
         s.name = name.trim() || s.name;
-        persistSections(sectionsState.key, sectionsState.sections);
+        persistSections(sectionsState.storageKey, sectionsState.sections);
         renderSectionUI();
     }
 
@@ -854,7 +879,7 @@
         descEl.value = sectionsState.sections[sectionsState.activeIndex].content;
         updateCount();
         setSaveState("idle", "수정됨 (저장 필요)"); clearErrorDetail();
-        persistSections(sectionsState.key, sectionsState.sections);
+        persistSections(sectionsState.storageKey, sectionsState.sections);
         renderSectionUI();
     }
 
@@ -867,7 +892,7 @@
         sectionsState.activeIndex = 0;
         descEl.value = combined;
         updateCount();
-        clearStoredSections(sectionsState.key);
+        clearStoredSections(sectionsState.storageKey);
         renderSectionUI();
     }
 
@@ -883,7 +908,7 @@
             if (!t) return;
             activePersonaId = key;
             saveSavedPersonaSelection(roomId, key);
-            initSectionsAfterLoad(key, t.get());
+            initSectionsAfterLoad(key, t.get(), personaSectionStorageKey(key));
             updateCount();
             setSaveState("idle", "대기중"); clearErrorDetail();
             rebuildPersonaDropdown();
@@ -893,7 +918,7 @@
         if (!p) return;
         activePersonaId = key;
         saveSavedPersonaSelection(roomId, key);
-        initSectionsAfterLoad(key, p.description || "");
+        initSectionsAfterLoad(key, p.description || "", personaSectionStorageKey(key));
         updateCount();
         setSaveState("idle", "대기중"); clearErrorDetail();
         rebuildPersonaDropdown();
@@ -1062,7 +1087,7 @@
         const target = getPlotTargets(draft).find(t => t.key === key);
         if (!target) return;
         activePlotTargetKey = key;
-        descEl.value = target.get(draft);
+        initSectionsAfterLoad(key, target.get(draft), plotSectionStorageKey(key));
         updateCount();
         setSaveState("idle", "대기중"); clearErrorDetail();
         rebuildPlotDropdown();
@@ -1587,7 +1612,7 @@
 
             if (res.ok) {
                 if (persona) persona.description = newDesc;
-                if (usesSections) persistSections(sectionsState.key, sectionsState.sections);
+                if (usesSections) persistSections(sectionsState.storageKey, sectionsState.sections);
                 setSaveState("saved", "저장됨 ✅");
             } else {
                 const t = await res.text().catch(() => "");
@@ -1644,7 +1669,7 @@
                 } else {
                     recMeData = { plotChatProfileId: recId, description: newDesc };
                 }
-                if (usesSections) persistSections(sectionsState.key, sectionsState.sections);
+                if (usesSections) persistSections(sectionsState.storageKey, sectionsState.sections);
                 setSaveState("saved", "저장됨 ✅");
                 rebuildPersonaDropdown();
             } else {
@@ -1714,7 +1739,9 @@
         setSaveState("saving", "저장 중... (최신본 확인 중)");
         clearErrorDetail();
 
-        const newText = descEl.value;
+        syncActiveSectionFromEditor();
+        const usesSections = sectionsState && sectionsState.key === activePlotTargetKey;
+        const newText = usesSections ? combinedSectionsText(sectionsState.sections) : descEl.value;
         const targetKey = activePlotTargetKey;
 
         try {
@@ -1746,6 +1773,7 @@
 
             if (res.ok) {
                 plotData = fresh;
+                if (usesSections) persistSections(sectionsState.storageKey, sectionsState.sections);
 
                 // draft 저장만으로는 실제 반영이 안 되고 "임시저장" 상태로 남는다.
                 // 실제 화면(대화)에 반영되려면 이 status API로 RELEASE를 한 번 더 보내야 한다.
@@ -1801,7 +1829,7 @@
         updateCount();
         updateStatus();
         clearErrorDetail();
-        if (mode === "persona" && sectionsState) {
+        if (sectionsActive()) {
             syncActiveSectionFromEditor();
             if (isMultiSection()) renderSectionUI(); // 탭 칩에 표시되는 글자수 갱신
         }
