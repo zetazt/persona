@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Zeta Persona Quick Editor
 // @namespace    zeta-persona-editor
-// @version      2.2.9
+// @version      2.5.0
 // @description  현재 방의 유저 페르소나(+추천 프로필) / {{char}} 상세 / 로어북을 자동으로 불러와서, 페이지 이동 없이 바로 수정/자동저장하는 미니 에디터
 // @match        https://zeta-ai.io/*
 // @match        https://*.zeta-ai.io/*
@@ -19,7 +19,15 @@
     }
     window.__ZETA_PERSONA_EDITOR_RUNNING__ = true;
 
-    const VERSION = "2.4.0";
+    const VERSION = "2.5.0";
+
+    // [v2.5.0] 페르소나/추천프로필 칸을 "이름 붙인 여러 탭"으로 나눠서 편집할 수 있게 하는 기능.
+    // 제타 서버는 여전히 하나의 이어붙은 텍스트만 저장하므로(엔터로만 구분), 탭 구조 자체는
+    // 이 스크립트가 이 브라우저의 localStorage에만 따로 기억해두고, 실제 저장 시에는
+    // 모든 탭의 내용을 SECTION_JOIN으로 이어붙인 하나의 문자열로 합쳐서 보낸다.
+    const SECTION_JOIN = "\n\n";
+    let sectionsState = null; // { key, sections: [{id, name, content}], activeIndex } | null
+    let sectionIdSeq = 1;
 
     const PROFILES_LIST_RE = /\/v1\/user-chat-profiles(?:\?|$)/;
     const PLOT_ROOM_RE = /\/plots\/([^/]+)\/rooms\/([^/]+)\//;
@@ -333,6 +341,24 @@
   .save-state.idle { color: #777; }
 
   hr { border: none; border-top: 1px solid #3a3b3e; margin: 10px 0; }
+
+  /* [v2.5.0] 페르소나 칸 나누기(탭) UI */
+  #section-tabs-row { flex-wrap: wrap; }
+  .section-tab-chip {
+    flex: 0 0 auto;
+    background: #3a3b3e;
+    border: 1px solid #555;
+    border-radius: 14px;
+    padding: 5px 10px;
+    font-size: 11px;
+  }
+  .section-tab-chip.active {
+    background: #4a90d9;
+    border-color: #4a90d9;
+    color: #fff;
+    font-weight: bold;
+  }
+  #section-tools-row button:disabled { opacity: 0.4; cursor: default; }
 </style>
 
 <div id="btn"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg><span class="dot"></span></div>
@@ -367,6 +393,16 @@
 
   <input type="text" id="lorebook-item-name" placeholder="항목 이름 (예: {{char}}, {{user}})" style="display:none;">
   <input type="text" id="lorebook-item-keywords" placeholder="키워드 (쉼표로 구분)" style="display:none;">
+
+  <div class="row" id="section-add-row" style="display:none;">
+    <button id="section-add-btn">＋ 칸 나누기</button>
+  </div>
+  <div class="row" id="section-tabs-row" style="display:none;"></div>
+  <div class="row" id="section-tools-row" style="display:none;">
+    <button id="section-rename-btn">✎ 이름변경</button>
+    <button id="section-delete-btn">🗑 삭제</button>
+    <button id="section-dissolve-btn">🔀 탭 해제</button>
+  </div>
 
   <textarea id="desc" placeholder="내용이 여기 자동으로 채워집니다."></textarea>
 
@@ -421,6 +457,13 @@
     const lorebookItemKeywordsEl = el("lorebook-item-keywords");
     const personaPinRowEl = el("persona-pin-row");
     const personaPinBtn = el("persona-pin-btn");
+    const sectionAddRowEl = el("section-add-row");
+    const sectionAddBtn = el("section-add-btn");
+    const sectionTabsRowEl = el("section-tabs-row");
+    const sectionToolsRowEl = el("section-tools-row");
+    const sectionRenameBtn = el("section-rename-btn");
+    const sectionDeleteBtn = el("section-delete-btn");
+    const sectionDissolveBtn = el("section-dissolve-btn");
 
     const BTN_SIZE = 32;
     const BTN_MARGIN = 4;
@@ -459,18 +502,33 @@
     applyPos(getPos());
 
     function currentFieldLimit() {
-        if (mode === "persona" && isRecKey(activePersonaId)) return 500;
+        if (mode === "persona" && isRecKey(activePersonaId)) return 1000; // [v2.5.0] 제타 업데이트로 500→1000자
         return null;
     }
 
     function updateCount() {
         const limit = currentFieldLimit();
         const len = descEl.value.length;
+
+        // [v2.5.0] 탭이 여러 개로 나뉘어 있으면, 실제 저장되는 값은 모든 탭을 합친 길이이므로
+        // "지금 보는 탭 길이"와 "전체 합계 길이"를 같이 보여준다.
+        let totalLen = len;
+        if (mode === "persona" && sectionsState && isMultiSection()) {
+            totalLen = sectionsState.sections.reduce((sum, s, idx) => {
+                return sum + (idx === sectionsState.activeIndex ? len : (s.content || "").length);
+            }, 0);
+        }
+        const showSplit = totalLen !== len;
+
         if (limit) {
-            countEl.textContent = `${len.toLocaleString()}/${limit}자`;
-            countEl.classList.toggle("over", len > limit);
+            countEl.textContent = showSplit
+                ? `이 탭 ${len.toLocaleString()}자 · 합계 ${totalLen.toLocaleString()}/${limit}자`
+                : `${len.toLocaleString()}/${limit}자`;
+            countEl.classList.toggle("over", totalLen > limit);
         } else {
-            countEl.textContent = `${len.toLocaleString()}자`;
+            countEl.textContent = showSplit
+                ? `이 탭 ${len.toLocaleString()}자 · 합계 ${totalLen.toLocaleString()}자`
+                : `${len.toLocaleString()}자`;
             countEl.classList.remove("over");
         }
     }
@@ -631,6 +689,193 @@
 
     let userPickedManually = false;
 
+    //------------------------------------------
+    // [v2.5.0] 페르소나 칸 나누기(탭) 기능
+    //------------------------------------------
+
+    // 커스텀 페르소나(id)는 방과 무관한 전역 프로필이라 id만으로 키를 잡고,
+    // 추천프로필("rec:xxx")은 방마다 실제 내용이 다를 수 있어 방 id까지 같이 키에 넣는다.
+    function sectionsStorageKeyFor(key) {
+        if (isRecKey(key)) return `zeta-persona-editor-sections::${roomId}::${key}`;
+        return `zeta-persona-editor-sections::${key}`;
+    }
+
+    function loadStoredSections(key, rawContent) {
+        try {
+            const raw = localStorage.getItem(sectionsStorageKeyFor(key));
+            if (!raw) return null;
+            const parsed = JSON.parse(raw);
+            if (!parsed || !Array.isArray(parsed.sections) || !parsed.sections.length) return null;
+            const joined = parsed.sections.map(s => s.content || "").join(SECTION_JOIN);
+            // 저장해둔 탭들을 합친 내용이 서버의 실제 최신 내용과 다르면 (다른 곳에서 수정됨 등)
+            // 탭 구조를 못 믿는 거라서 그냥 버리고 단일 칸으로 되돌린다. 데이터 유실 방지가 우선.
+            if (joined !== rawContent) return null;
+            return parsed.sections.map(s => ({ id: s.id || newSectionId(), name: s.name || "이름없음", content: s.content || "" }));
+        } catch {
+            return null;
+        }
+    }
+
+    function persistSections(key, sections) {
+        try {
+            localStorage.setItem(sectionsStorageKeyFor(key), JSON.stringify({ sections }));
+        } catch { /* 저장 용량 초과 등은 조용히 무시 (탭 기억만 안 될 뿐 편집 자체는 계속 됨) */ }
+    }
+
+    function clearStoredSections(key) {
+        try { localStorage.removeItem(sectionsStorageKeyFor(key)); } catch { /* ignore */ }
+    }
+
+    function combinedSectionsText(sections) {
+        return sections.map(s => s.content || "").join(SECTION_JOIN);
+    }
+
+    function newSectionId() {
+        return "s" + (sectionIdSeq++) + "_" + Date.now().toString(36);
+    }
+
+    function isMultiSection() {
+        return !!(sectionsState && sectionsState.sections.length > 1);
+    }
+
+    // 페르소나를 (다시) 불러올 때 호출. 같은 대상(key)을 다시 불러오는 거면
+    // (예: 모드를 잠깐 벗어났다 돌아옴) 메모리에 있던 탭 상태를 그대로 유지하고
+    // textarea만 활성 탭 내용으로 다시 맞춰준다. 대상이 바뀌면 저장된 탭 구조를
+    // 불러오거나, 없으면 통짜 내용 하나짜리("전체") 탭으로 새로 시작한다.
+    function initSectionsAfterLoad(key, rawContent) {
+        if (sectionsState && sectionsState.key === key) {
+            descEl.value = sectionsState.sections[sectionsState.activeIndex].content;
+            renderSectionUI();
+            return;
+        }
+        const stored = loadStoredSections(key, rawContent);
+        if (stored) {
+            sectionsState = { key, sections: stored, activeIndex: 0 };
+        } else {
+            sectionsState = { key, sections: [{ id: newSectionId(), name: "전체", content: rawContent }], activeIndex: 0 };
+        }
+        descEl.value = sectionsState.sections[sectionsState.activeIndex].content;
+        renderSectionUI();
+    }
+
+    // 지금 textarea에 있는 내용을 현재 활성 탭에 반영해둔다 (탭 전환/저장 직전에 호출).
+    function syncActiveSectionFromEditor() {
+        if (!sectionsState) return;
+        const s = sectionsState.sections[sectionsState.activeIndex];
+        if (s) s.content = descEl.value;
+    }
+
+    function switchSection(idx) {
+        if (!sectionsState || !sectionsState.sections[idx]) return;
+        syncActiveSectionFromEditor();
+        sectionsState.activeIndex = idx;
+        descEl.value = sectionsState.sections[idx].content;
+        updateCount();
+        setSaveState("idle", "대기중"); clearErrorDetail();
+        renderSectionUI();
+    }
+
+    function renderSectionUI() {
+        const active = mode === "persona" && !!sectionsState;
+        if (!active) {
+            sectionAddRowEl.style.display = "none";
+            sectionTabsRowEl.style.display = "none";
+            sectionToolsRowEl.style.display = "none";
+            return;
+        }
+        const multi = isMultiSection();
+        sectionAddRowEl.style.display = multi ? "none" : "";
+        sectionTabsRowEl.style.display = multi ? "" : "none";
+        sectionToolsRowEl.style.display = multi ? "" : "none";
+        if (!multi) return;
+
+        sectionTabsRowEl.innerHTML = "";
+        sectionsState.sections.forEach((s, idx) => {
+            const btn = document.createElement("button");
+            btn.className = "section-tab-chip" + (idx === sectionsState.activeIndex ? " active" : "");
+            const len = idx === sectionsState.activeIndex ? descEl.value.length : (s.content || "").length;
+            btn.textContent = `${s.name} (${len})`;
+            btn.addEventListener("click", () => {
+                if (idx === sectionsState.activeIndex) {
+                    renameActiveSection(); // 이미 선택된 탭을 다시 누르면 이름 바꾸기
+                } else {
+                    switchSection(idx);
+                }
+            });
+            sectionTabsRowEl.appendChild(btn);
+        });
+        const addBtn = document.createElement("button");
+        addBtn.className = "section-tab-chip";
+        addBtn.textContent = "＋";
+        addBtn.title = "새 탭 추가";
+        addBtn.addEventListener("click", addNewSection);
+        sectionTabsRowEl.appendChild(addBtn);
+
+        sectionDeleteBtn.disabled = sectionsState.sections.length <= 1;
+    }
+
+    function addNewSection() {
+        if (!sectionsState) return;
+        syncActiveSectionFromEditor();
+        // 아직 한 칸(미분리) 상태였다면, 지금 내용에 먼저 이름을 붙여준다.
+        if (sectionsState.sections.length === 1) {
+            const firstName = prompt("지금 내용을 담을 첫 번째 탭 이름을 지어주세요.\n(예: 고정설정)", sectionsState.sections[0].name === "전체" ? "고정설정" : sectionsState.sections[0].name);
+            if (firstName === null) return; // 취소하면 나누기 자체를 취소
+            sectionsState.sections[0].name = firstName.trim() || "탭 1";
+        }
+        const name = prompt("새 탭 이름을 입력해주세요.\n(예: 오늘일정, 상황요약)", "새 탭");
+        if (name === null) return;
+        sectionsState.sections.push({ id: newSectionId(), name: name.trim() || "새 탭", content: "" });
+        sectionsState.activeIndex = sectionsState.sections.length - 1;
+        descEl.value = "";
+        updateCount();
+        setSaveState("idle", "수정됨 (저장 필요)"); clearErrorDetail();
+        persistSections(sectionsState.key, sectionsState.sections);
+        renderSectionUI();
+    }
+
+    function renameActiveSection() {
+        if (!sectionsState) return;
+        const s = sectionsState.sections[sectionsState.activeIndex];
+        if (!s) return;
+        const name = prompt("탭 이름 바꾸기", s.name);
+        if (name === null) return;
+        s.name = name.trim() || s.name;
+        persistSections(sectionsState.key, sectionsState.sections);
+        renderSectionUI();
+    }
+
+    function deleteActiveSection() {
+        if (!sectionsState || sectionsState.sections.length <= 1) return;
+        const s = sectionsState.sections[sectionsState.activeIndex];
+        if (!confirm(`"${s.name}" 탭을 삭제할까요? (이 탭 내용은 사라지고, 저장을 눌러야 실제로 반영돼요)`)) return;
+        sectionsState.sections.splice(sectionsState.activeIndex, 1);
+        sectionsState.activeIndex = Math.max(0, sectionsState.activeIndex - 1);
+        descEl.value = sectionsState.sections[sectionsState.activeIndex].content;
+        updateCount();
+        setSaveState("idle", "수정됨 (저장 필요)"); clearErrorDetail();
+        persistSections(sectionsState.key, sectionsState.sections);
+        renderSectionUI();
+    }
+
+    function dissolveSections() {
+        if (!sectionsState) return;
+        if (!confirm("탭 구분을 없애고 하나로 합칠까요? (실제 내용은 그대로 유지돼요)")) return;
+        syncActiveSectionFromEditor();
+        const combined = combinedSectionsText(sectionsState.sections);
+        sectionsState.sections = [{ id: newSectionId(), name: "전체", content: combined }];
+        sectionsState.activeIndex = 0;
+        descEl.value = combined;
+        updateCount();
+        clearStoredSections(sectionsState.key);
+        renderSectionUI();
+    }
+
+    sectionAddBtn.addEventListener("click", addNewSection);
+    sectionRenameBtn.addEventListener("click", renameActiveSection);
+    sectionDeleteBtn.addEventListener("click", deleteActiveSection);
+    sectionDissolveBtn.addEventListener("click", dissolveSections);
+
     function loadPersonaIntoEditor(key) {
         if (isRecKey(key)) {
             const recId = recIdFromKey(key);
@@ -638,7 +883,7 @@
             if (!t) return;
             activePersonaId = key;
             saveSavedPersonaSelection(roomId, key);
-            descEl.value = t.get();
+            initSectionsAfterLoad(key, t.get());
             updateCount();
             setSaveState("idle", "대기중"); clearErrorDetail();
             rebuildPersonaDropdown();
@@ -648,7 +893,7 @@
         if (!p) return;
         activePersonaId = key;
         saveSavedPersonaSelection(roomId, key);
-        descEl.value = p.description || "";
+        initSectionsAfterLoad(key, p.description || "");
         updateCount();
         setSaveState("idle", "대기중"); clearErrorDetail();
         rebuildPersonaDropdown();
@@ -658,7 +903,12 @@
         if (userPickedManually) return false;
         const saved = getSavedPersonaSelection(roomId);
         if (!saved) return false;
-        if (activePersonaId === saved) return true;
+        if (activePersonaId === saved) {
+            // [v2.5.0] textarea는 {{char}}/로어북 모드와 공유되므로, persona 모드로 돌아왔을 때
+            // 화면(및 탭 상태)을 다시 맞춰주기 위해 항상 한 번 더 로드한다. (네트워크 요청 없음)
+            loadPersonaIntoEditor(saved);
+            return true;
+        }
         if (isRecKey(saved)) {
             const recId = recIdFromKey(saved);
             if (getRecTargets(recRoomData).some(t => t.key === recId)) {
@@ -1319,8 +1569,11 @@
         setSaveState("saving", "저장 중...");
         clearErrorDetail();
 
+        syncActiveSectionFromEditor();
+        const usesSections = sectionsState && sectionsState.key === activePersonaId;
+        const newDesc = usesSections ? combinedSectionsText(sectionsState.sections) : descEl.value;
+
         const persona = personaList.find(p => p.id === activePersonaId);
-        const newDesc = descEl.value;
 
         try {
             const res = await originalFetch(PROFILE_PATCH_URL(activePersonaId), {
@@ -1334,6 +1587,7 @@
 
             if (res.ok) {
                 if (persona) persona.description = newDesc;
+                if (usesSections) persistSections(sectionsState.key, sectionsState.sections);
                 setSaveState("saved", "저장됨 ✅");
             } else {
                 const t = await res.text().catch(() => "");
@@ -1369,7 +1623,9 @@
         clearErrorDetail();
 
         const recId = recIdFromKey(activePersonaId);
-        const newDesc = descEl.value;
+        syncActiveSectionFromEditor();
+        const usesSections = sectionsState && sectionsState.key === activePersonaId;
+        const newDesc = usesSections ? combinedSectionsText(sectionsState.sections) : descEl.value;
 
         try {
             const res = await originalFetch(REC_PATCH_URL(roomId), {
@@ -1388,12 +1644,13 @@
                 } else {
                     recMeData = { plotChatProfileId: recId, description: newDesc };
                 }
+                if (usesSections) persistSections(sectionsState.key, sectionsState.sections);
                 setSaveState("saved", "저장됨 ✅");
                 rebuildPersonaDropdown();
             } else {
                 const t = await res.text().catch(() => "");
                 let friendly = `실패 ❌ (HTTP ${res.status})`;
-                if (t.includes("CONSTRAINT")) friendly = "실패 ❌ 글자수 제한 초과 (500자)";
+                if (t.includes("CONSTRAINT")) friendly = "실패 ❌ 글자수 제한 초과 (1000자)";
                 setSaveState("error", friendly);
                 showErrorDetail(t || "(응답 본문 없음)");
                 console.error("🩶 PersonaEditor(rec) 저장 실패:", res.status, t);
@@ -1544,6 +1801,10 @@
         updateCount();
         updateStatus();
         clearErrorDetail();
+        if (mode === "persona" && sectionsState) {
+            syncActiveSectionFromEditor();
+            if (isMultiSection()) renderSectionUI(); // 탭 칩에 표시되는 글자수 갱신
+        }
         if (getAutosaveEnabled()) {
             setSaveState("idle", "입력 중...");
             clearTimeout(saveDebounce);
@@ -1694,6 +1955,7 @@
                 await refreshMyLorebooks(false);
             }
         }
+        renderSectionUI(); // persona 모드가 아니면 탭 UI 숨김, persona면 현재 상태로 다시 그림
         updateStatus();
     }
 
@@ -1763,9 +2025,11 @@
             recMeData = null;
             recMeFetchedForRoom = null;
             recMeRecheckDoneForRoom = null;
+            sectionsState = null;
             selectEl.innerHTML = "<option>불러오는 중...</option>";
             descEl.value = "";
             updateCount();
+            renderSectionUI();
             refreshRoomUI();
             if (mode === "plot") refreshPlotData(false);
             if (mode === "persona") {
