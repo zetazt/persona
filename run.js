@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Zeta Persona Quick Editor
 // @namespace    zeta-persona-editor
-// @version      2.6.0
+// @version      2.6.1
 // @description  현재 방의 유저 페르소나(+추천 프로필) / {{char}} 상세 / 로어북을 자동으로 불러와서, 페이지 이동 없이 바로 수정/자동저장하는 미니 에디터
 // @match        https://zeta-ai.io/*
 // @match        https://*.zeta-ai.io/*
@@ -19,7 +19,7 @@
     }
     window.__ZETA_PERSONA_EDITOR_RUNNING__ = true;
 
-    const VERSION = "2.6.0";
+    const VERSION = "2.6.1";
 
     // [v2.5.0] 페르소나/추천프로필 칸을 "이름 붙인 여러 탭"으로 나눠서 편집할 수 있게 하는 기능.
     // 제타 서버는 여전히 하나의 이어붙은 텍스트만 저장하므로(엔터로만 구분), 탭 구조 자체는
@@ -501,16 +501,13 @@
 
     applyPos(getPos());
 
-    function currentFieldLimit() {
-        if (mode === "persona" && isRecKey(activePersonaId)) return 1000; // [v2.5.0] 제타 업데이트로 500→1000자
-        return null;
-    }
-
+    // [v2.6.1] 실제 글자수 제한은 제타가 언제든 바꿀 수 있어서, 여기서 숫자를 하드코딩해
+    // "/N자"로 보여주는 건 업데이트마다 어긋날 위험이 있다. 그래서 제한 숫자 표시는 없애고
+    // 그냥 현재 글자수(+탭 합계)만 보여준다. 실제 제한 초과 여부는 저장 시 서버가 알려준다.
     function updateCount() {
-        const limit = currentFieldLimit();
         const len = descEl.value.length;
 
-        // [v2.5.0] 탭이 여러 개로 나뉘어 있으면, 실제 저장되는 값은 모든 탭을 합친 길이이므로
+        // 탭이 여러 개로 나뉘어 있으면, 실제 저장되는 값은 모든 탭을 합친 길이이므로
         // "지금 보는 탭 길이"와 "전체 합계 길이"를 같이 보여준다.
         let totalLen = len;
         if (sectionsActive() && isMultiSection()) {
@@ -520,17 +517,10 @@
         }
         const showSplit = totalLen !== len;
 
-        if (limit) {
-            countEl.textContent = showSplit
-                ? `이 탭 ${len.toLocaleString()}자 · 합계 ${totalLen.toLocaleString()}/${limit}자`
-                : `${len.toLocaleString()}/${limit}자`;
-            countEl.classList.toggle("over", totalLen > limit);
-        } else {
-            countEl.textContent = showSplit
-                ? `이 탭 ${len.toLocaleString()}자 · 합계 ${totalLen.toLocaleString()}자`
-                : `${len.toLocaleString()}자`;
-            countEl.classList.remove("over");
-        }
+        countEl.textContent = showSplit
+            ? `이 탭 ${len.toLocaleString()}자 · 합계 ${totalLen.toLocaleString()}자`
+            : `${len.toLocaleString()}자`;
+        countEl.classList.remove("over");
     }
 
     function setSaveState(state, label) {
@@ -1675,7 +1665,7 @@
             } else {
                 const t = await res.text().catch(() => "");
                 let friendly = `실패 ❌ (HTTP ${res.status})`;
-                if (t.includes("CONSTRAINT")) friendly = "실패 ❌ 글자수 제한 초과 (1000자)";
+                if (t.includes("CONSTRAINT")) friendly = "실패 ❌ 글자수 제한 초과";
                 setSaveState("error", friendly);
                 showErrorDetail(t || "(응답 본문 없음)");
                 console.error("🩶 PersonaEditor(rec) 저장 실패:", res.status, t);
