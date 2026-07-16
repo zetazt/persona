@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Zeta Persona Quick Editor
 // @namespace    zeta-persona-editor
-// @version      2.6.1
+// @version      2.6.2
 // @description  현재 방의 유저 페르소나(+추천 프로필) / {{char}} 상세 / 로어북을 자동으로 불러와서, 페이지 이동 없이 바로 수정/자동저장하는 미니 에디터
 // @match        https://zeta-ai.io/*
 // @match        https://*.zeta-ai.io/*
@@ -19,7 +19,7 @@
     }
     window.__ZETA_PERSONA_EDITOR_RUNNING__ = true;
 
-    const VERSION = "2.6.1";
+    const VERSION = "2.6.2";
 
     // [v2.5.0] 페르소나/추천프로필 칸을 "이름 붙인 여러 탭"으로 나눠서 편집할 수 있게 하는 기능.
     // 제타 서버는 여전히 하나의 이어붙은 텍스트만 저장하므로(엔터로만 구분), 탭 구조 자체는
@@ -1586,7 +1586,10 @@
 
         syncActiveSectionFromEditor();
         const usesSections = sectionsState && sectionsState.key === activePersonaId;
-        const newDesc = usesSections ? combinedSectionsText(sectionsState.sections) : descEl.value;
+        // [v2.6.2] {{char}}/로어북 저장과 동일하게, 깨진 서로게이트 문자(반쪽짜리 이모지 등)를
+        // 서버로 보내기 직전에 걸러낸다. 이게 빠져있으면 눈에 안 보이는 문자 때문에
+        // "description은 Invalid input field" 같은 400 에러가 원인 불명으로 뜰 수 있었다.
+        const newDesc = sanitizeSurrogates(usesSections ? combinedSectionsText(sectionsState.sections) : descEl.value);
 
         const persona = personaList.find(p => p.id === activePersonaId);
 
@@ -1640,7 +1643,8 @@
         const recId = recIdFromKey(activePersonaId);
         syncActiveSectionFromEditor();
         const usesSections = sectionsState && sectionsState.key === activePersonaId;
-        const newDesc = usesSections ? combinedSectionsText(sectionsState.sections) : descEl.value;
+        // [v2.6.2] 위 doAutoSavePersona와 동일한 이유로 sanitizeSurrogates 적용.
+        const newDesc = sanitizeSurrogates(usesSections ? combinedSectionsText(sectionsState.sections) : descEl.value);
 
         try {
             const res = await originalFetch(REC_PATCH_URL(roomId), {
