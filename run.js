@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Zeta Persona Quick Editor
 // @namespace    zeta-persona-editor
-// @version      2.6.2
+// @version      2.6.3
 // @description  현재 방의 유저 페르소나(+추천 프로필) / {{char}} 상세 / 로어북을 자동으로 불러와서, 페이지 이동 없이 바로 수정/자동저장하는 미니 에디터
 // @match        https://zeta-ai.io/*
 // @match        https://*.zeta-ai.io/*
@@ -19,7 +19,7 @@
     }
     window.__ZETA_PERSONA_EDITOR_RUNNING__ = true;
 
-    const VERSION = "2.6.2";
+    const VERSION = "2.6.3";
 
     // [v2.5.0] 페르소나/추천프로필 칸을 "이름 붙인 여러 탭"으로 나눠서 편집할 수 있게 하는 기능.
     // 제타 서버는 여전히 하나의 이어붙은 텍스트만 저장하므로(엔터로만 구분), 탭 구조 자체는
@@ -196,18 +196,30 @@
             if (!Array.isArray(list)) return;
 
             personaList = list;
-            if (!tryApplySavedPersonaSelection() && !userPickedManually && !activePersonaId) {
-                const sel = list.find(p => p && p.selected);
-                if (sel && sel.id) loadPersonaIntoEditor(sel.id);
+
+            // [v2.6.3] 이 함수는 우리 패널의 클릭이 아니라 "네트워크에서 이 목록 요청이
+            // 감지될 때마다" 실행된다 — 예를 들어 유저가 제타 사이트 자체의 유저프로필
+            // 선택창을 열기만 해도 이 요청이 발생한다. 그런데 이때 우리 패널이 {{char}}나
+            // 로어북 모드를 보고 있는 중이었다면, 아래 로직이 (같은 select/textarea를 공유하는)
+            // 화면을 페르소나 내용으로 멋대로 덮어써버리는 문제가 있었다. ("가끔 {{user}}
+            // 내용이 {{char}} 칸에 뜬다"는 문제의 실제 원인 중 하나.) 그래서 지금 패널이
+            // 실제로 persona 모드를 보고 있을 때만 화면(select/textarea)을 건드리도록 막는다.
+            if (mode === "persona") {
+                if (!tryApplySavedPersonaSelection() && !userPickedManually && !activePersonaId) {
+                    const sel = list.find(p => p && p.selected);
+                    if (sel && sel.id) loadPersonaIntoEditor(sel.id);
+                }
+                rebuildPersonaDropdown();
             }
-            rebuildPersonaDropdown();
 
             // 이 목록(personaList)은 방금 잡혔는데, 연결 정보(recRoomData/recMeData)가
             // 아직 없는 상태로 먼저 그려졌을 수 있다 (경쟁 상태). 뒤늦게라도 받아와서
             // 다시 그려서 🔗 표시/정렬이 스스로 맞게 고쳐지도록 한다.
             if (!recRoomData && atRoomId === roomId && capturedAuth) {
                 refreshRecData().then(ok => {
-                    if (ok && roomId === atRoomId) {
+                    // [v2.6.3] fetch가 끝나기까지 걸리는 시간 동안 모드가 바뀌었을 수도
+                    // 있으므로, 여기서도 다시 한 번 persona 모드인지 확인한다.
+                    if (ok && roomId === atRoomId && mode === "persona") {
                         rebuildPersonaDropdown();
                         updateStatus();
                     }
@@ -758,9 +770,20 @@
     // 저장된 탭 구조를 불러오거나, 없으면 통짜 내용 하나짜리("전체") 탭으로 새로 시작한다.
     function initSectionsAfterLoad(key, rawContent, storageKey) {
         if (sectionsState && sectionsState.key === key && sectionsState.storageKey === storageKey) {
-            descEl.value = sectionsState.sections[sectionsState.activeIndex].content;
-            renderSectionUI();
-            return;
+            // [v2.6.3] 예전에는 key/storageKey만 같으면 무조건 메모리에 있던 탭 상태를
+            // 그대로 재사용했다. 그런데 '새로고침' 버튼으로 서버 최신 내용을 새로 받아온
+            // 경우에도 이 조건을 그대로 타버려서, 화면이 옛날(캐시된) 내용을 계속 보여주고
+            // 있었다 — "새로고침 눌러도 안 바뀐다"는 문제의 원인. 심지어 그 상태에서 저장을
+            // 누르면 옛날 내용으로 서버 값을 덮어써서 데이터가 날아가는 것처럼 보였다.
+            // 그래서 지금 갖고 있는 탭들을 합친 내용과 방금 넘어온 rawContent(서버 최신값일
+            // 수 있음)를 비교해서, 같으면 그대로(빠른 경로), 다르면 최신 내용 기준으로
+            // 다시 초기화한다.
+            const currentCombined = combinedSectionsText(sectionsState.sections);
+            if (currentCombined === rawContent) {
+                descEl.value = sectionsState.sections[sectionsState.activeIndex].content;
+                renderSectionUI();
+                return;
+            }
         }
         const stored = loadStoredSections(storageKey, rawContent);
         if (stored) {
@@ -1099,17 +1122,27 @@
     async function refreshPlotData(preserveTarget) {
         const fresh = await fetchPlotFresh();
         if (!fresh || !fresh.draft) {
-            setSaveState("error", "불러오기 실패 ❌");
+            if (mode === "plot") setSaveState("error", "불러오기 실패 ❌");
             return false;
         }
         plotData = fresh;
-        const targets = getPlotTargets(fresh.draft);
-        if (preserveTarget && targets.find(t => t.key === activePlotTargetKey)) {
-            loadPlotTargetIntoEditor(activePlotTargetKey);
-        } else if (targets.length) {
-            loadPlotTargetIntoEditor(targets[0].key);
+
+        // [v2.6.3] 이 함수는 {{char}} 모드뿐 아니라, 로어북 모드(lorebookIds 연결 상태
+        // 확인용)나 방 전환 감지 로직에서도 "plotData만 필요해서" 호출된다. 그런데 예전에는
+        // 여기서 무조건 loadPlotTargetIntoEditor를 불러서 화면(select/textarea)을
+        // {{char}} 내용으로 덮어써버렸다 — 로어북 모드를 보고 있는데 갑자기 {{char}} 내용이
+        // (또는 반대로) 뜨는 문제의 실제 원인이었다. 이제는 실제로 지금 화면이 plot 모드를
+        // 보고 있을 때만 에디터를 갱신한다. (await 이후에 다시 mode를 체크하는 이유: 그 사이에
+        // 유저가 다른 모드로 넘어갔을 수도 있어서.)
+        if (mode === "plot") {
+            const targets = getPlotTargets(fresh.draft);
+            if (preserveTarget && targets.find(t => t.key === activePlotTargetKey)) {
+                loadPlotTargetIntoEditor(activePlotTargetKey);
+            } else if (targets.length) {
+                loadPlotTargetIntoEditor(targets[0].key);
+            }
+            updateStatus();
         }
-        updateStatus();
         return true;
     }
 
@@ -1950,9 +1983,18 @@
                 updateCount();
             }
         } else if (mode === "plot") {
-            if (getDraft(plotData)) {
+            const draft = getDraft(plotData);
+            if (draft) {
+                // [v2.6.3] plotData는 캐시돼 있는데 activePlotTargetKey가 비어있는 경우
+                // (예: 로어북 모드에서 lorebookIds 확인용으로만 plotData가 채워졌던 경우),
+                // 예전에는 아무 것도 안 불러와서 화면에 이전 모드의 내용이 그대로 남아있었다.
+                // 이제는 그런 경우에도 항상 첫 번째 항목이라도 확실히 불러오도록 한다.
+                const targets = getPlotTargets(draft);
+                const keyToLoad = (activePlotTargetKey && targets.some(t => t.key === activePlotTargetKey))
+                    ? activePlotTargetKey
+                    : (targets[0] && targets[0].key);
                 rebuildPlotDropdown();
-                if (activePlotTargetKey) loadPlotTargetIntoEditor(activePlotTargetKey);
+                if (keyToLoad) loadPlotTargetIntoEditor(keyToLoad);
             } else {
                 selectEl.innerHTML = "<option>불러오는 중...</option>";
                 descEl.value = "";
@@ -2016,6 +2058,12 @@
                         loadPersonaIntoEditor(REC_KEY_PREFIX + recTargets[0].key);
                     }
                 }
+            } else if (activePersonaId) {
+                // [v2.6.3] 이미 선택돼 있던 항목이 있다면, 방금 새로고침으로 받아온 최신
+                // 내용으로 화면(textarea)도 다시 채워준다. 예전에는 목록(personaList)만
+                // 갱신되고 화면은 그대로라서, "새로고침을 눌러도 안 바뀌고 다른 항목을
+                // 골랐다가 돌아와야만 반영되는" 문제가 있었다.
+                loadPersonaIntoEditor(activePersonaId);
             }
             rebuildPersonaDropdown();
             updateStatus();
@@ -2024,6 +2072,12 @@
         } else {
             await refreshPlotData(true); // lorebookIds 연결 상태도 최신화
             await refreshMyLorebooks(true);
+            // [v2.6.3] refreshMyLorebooks(true)는 선택된 로어북/항목이 여전히 존재하면
+            // 목록(select) 라벨만 새로 그리고 textarea 내용은 그대로 둔다. 그래서 최신
+            // 내용으로 실제 화면까지 갱신되도록 한 번 더 명시적으로 불러온다.
+            if (activeLorebookId && activeLorebookItemId && activeLorebookItemId !== NEW_ITEM_KEY) {
+                loadLorebookItemIntoEditor(activeLorebookItemId);
+            }
         }
     });
 
